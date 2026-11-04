@@ -83,6 +83,8 @@ function App() {
   const [arbAmt, setArbAmt] = useState('1000');
   const [arbView, setArbView] = useState<ArbView | null>(null);
   const [wrapAmt, setWrapAmt] = useState('1');
+  const [lpPending, setLpPending] = useState('');
+  const pickGen = useRef(0);
 
   function pushLog(line: string) {
     setLogs((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 80));
@@ -94,15 +96,23 @@ function App() {
       selectedRef.current && rows.some((row) => row.key === selectedRef.current)
         ? selectedRef.current
         : (rows[0]?.key ?? '');
-    selectedRef.current = key;
-    setPools(rows);
-    setSelected(key);
     const pool = rows.find((row) => row.key === key);
-    setLps(pool ? await loadLps(provider, pool.exchangeIndex, pool.pair) : []);
-    if (owner) {
-      setBalances(await loadBalances(provider, owner));
-      setNfts(await loadMyNfts(provider, owner));
+    const nextLps = pool ? await loadLps(provider, pool.exchangeIndex, pool.pair) : [];
+    const nextBal = owner ? await loadBalances(provider, owner) : null;
+    const nextNfts = owner ? await loadMyNfts(provider, owner) : null;
+    const liveKey =
+      selectedRef.current && rows.some((row) => row.key === selectedRef.current) ? selectedRef.current : key;
+    setPools(rows);
+    if (nextBal && nextNfts) {
+      setBalances(nextBal);
+      setNfts(nextNfts);
     }
+    // 读取期间又点了别的池子，别把旧表盖回去。
+    if (liveKey !== key) return;
+    selectedRef.current = key;
+    setSelected(key);
+    setLps(nextLps);
+    setLpPending('');
   }
 
   useEffect(() => {
@@ -198,14 +208,23 @@ function App() {
   }
 
   async function onChoose(key: string) {
-    selectedRef.current = key;
-    setSelected(key);
     const pool = pools.find((row) => row.key === key);
-    const provider = providerRef.current ?? rpcProvider();
     if (!pool) return;
+    const gen = ++pickGen.current;
+    const previous = selectedRef.current;
+    selectedRef.current = key;
+    setLpPending(`正在读取 ${pool.exchangeName} · ${displaySymbol(pool.token0)} / ${displaySymbol(pool.token1)}`);
+    const provider = providerRef.current ?? rpcProvider();
     try {
-      setLps(await loadLps(provider, pool.exchangeIndex, pool.pair));
+      const rows = await loadLps(provider, pool.exchangeIndex, pool.pair);
+      if (gen !== pickGen.current) return;
+      setSelected(key);
+      setLps(rows);
+      setLpPending('');
     } catch (err) {
+      if (gen !== pickGen.current) return;
+      selectedRef.current = previous;
+      setLpPending('');
       setError(errText(err));
     }
   }
@@ -603,6 +622,7 @@ function App() {
         ) : (
           <p className="note">先在上面选一个池子。</p>
         )}
+        {lpPending ? <p className="note">{lpPending}</p> : null}
         <PositionTable rows={lps} showOwner />
         {current ? (
           <div className="fields">
@@ -792,7 +812,7 @@ function App() {
                   priceSellAfter: parsed.args.priceSellAfter,
                   tokenIn: tokenIn.symbol,
                   tokenOut: tokenOut.symbol,
-                  source: '链上结果',
+                  source: '已成交',
                 });
               })
             }
@@ -882,7 +902,13 @@ async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId,
   };
 }
 
+export function arbHeadline(done: boolean, profitable: boolean, profitText: string, token: string) {
+  if (!profitable) return done ? '已成交，但没有正利润' : '预览，当前没有正利润';
+  return done ? `已成交，实际利润 ${profitText} ${token}` : `预览，预计利润 ${profitText} ${token}`;
+}
+
 function ArbBox({ view }: { view: ArbView }) {
+  const done = view.source === '已成交';
   return (
     <div className="arb-box">
       <div className="arb-path" title="同一笔交易里按这个顺序走">
@@ -892,13 +918,11 @@ function ArbBox({ view }: { view: ArbView }) {
         <span className="hop">卖出 · {view.sellName || '—'}</span>
         <span className="step">{fmt(view.amountBack)} {view.tokenIn}</span>
       </div>
+      <p>{arbHeadline(done, view.profitable, fmt(view.profit), view.tokenIn)}</p>
       <p>
-        {view.source}
-        {view.profitable ? `，预计利润 ${fmt(view.profit)} ${view.tokenIn}` : '，当前没有正利润'}
-      </p>
-      <p>
-        在 {view.buyName} 用 {view.tokenIn} 买入 {fmt(view.amountBought)} {view.tokenOut}，再到 {view.sellName} 卖回{' '}
-        {fmt(view.amountBack)} {view.tokenIn}
+        {done
+          ? `已在 ${view.buyName} 用 ${view.tokenIn} 买入 ${fmt(view.amountBought)} ${view.tokenOut}，并在 ${view.sellName} 卖出 ${fmt(view.amountBack)} ${view.tokenIn}`
+          : `在 ${view.buyName} 用 ${view.tokenIn} 买入 ${fmt(view.amountBought)} ${view.tokenOut}，再到 ${view.sellName} 卖回 ${fmt(view.amountBack)} ${view.tokenIn}`}
       </p>
       <p className="note">
         价格（1 {view.tokenIn} 值多少 {view.tokenOut}）：买入边 {fmt(view.priceBuyBefore)} → {fmt(view.priceBuyAfter)}，卖出边{' '}
