@@ -783,7 +783,7 @@ function App() {
       </section>
       <footer className="foot">
         浙大区块链作业2 · MiniDEX
-        <span className="sid" title="交作业前改成自己的">学号 TODO</span>
+        <span className="sid">魏宝龙 · 3230105407</span>
       </footer>
     </div>
   );
