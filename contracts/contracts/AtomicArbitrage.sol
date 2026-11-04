@@ -186,9 +186,8 @@ contract AtomicArbitrage {
         c.priceBeforeSell = _spot(sellRouter, tokenIn, tokenOut);
         (uint256 buyIn, uint256 buyOut) = _reserves(buyRouter, tokenIn, tokenOut);
         (uint256 sellIn, uint256 sellOut) = _reserves(sellRouter, tokenIn, tokenOut);
-        // 买的那边：tokenIn 变多，tokenOut 变少。
+        // 成交后价格按储备加减估，方向和 spot 一样，都是 tokenOut / tokenIn。
         c.priceAfterBuy = (buyOut - c.amountBought) * 1e18 / (buyIn + amountIn);
-        // 卖的那边：tokenOut 变多，tokenIn 变少。spot 仍然是 tokenOut / tokenIn。
         c.priceAfterSell = (sellOut + c.amountBought) * 1e18 / (sellIn - c.amountBack);
     }
 

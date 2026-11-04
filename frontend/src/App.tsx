@@ -106,9 +106,10 @@ function App() {
   }
 
   useEffect(() => {
+    console.log('MiniDEX：x*y=k。池子不会累，我会。');
     const provider = rpcProvider();
     let cancelled = false;
-    // 开发模式会装上又卸下一次，取消后的请求不要把错误留在页面上。
+    // 开发模式会装上又卸下一次，取消掉的请求别把错误留在页面上。
     reload(provider).catch(() => {
       if (!cancelled) setError('本地节点还没连上。先在 contracts 里启动节点并部署，再点刷新。');
     });
@@ -151,7 +152,7 @@ function App() {
         });
       }
     }
-    const next = new BrowserProvider(injected);
+    const next = new BrowserProvider(injected, undefined, { cacheTimeout: -1 });
     const signer = await next.getSigner();
     const addr = await signer.getAddress();
     signerRef.current = signer;
@@ -224,6 +225,8 @@ function App() {
     return { out, amount, left, right };
   }
 
+  const impactText = describeImpact(pools, exchangeIndex, swapIn, swapOut, swapAmt);
+
   function minOut(quoted: bigint) {
     const pct = Number(slippage);
     if (!Number.isFinite(pct) || pct < 0 || pct > 50) throw new Error('滑点填 0 到 50 之间的百分数');
@@ -234,8 +237,9 @@ function App() {
   return (
     <div className="page">
       <header className="top">
-        <h1>MiniDEX</h1>
-        <p>恒定乘积做市，流动性凭证是 ERC721。手续费 0.3%，留在池子里按份额分给 LP。</p>
+        <p className="kicker">浙大区块链作业2</p>
+        <h1 title="玉泉机房周末版，别部署到主网">MiniDEX</h1>
+        <p>恒定乘积。流动性记在 NFT 上，手续费 0.3% 留在池子里。</p>
       </header>
       <nav className="nav">
         <a href="#wallet">钱包</a>
@@ -563,6 +567,7 @@ function App() {
           </button>
         </div>
         {quoteText ? <p>{quoteText}</p> : null}
+        {impactText ? <p className="note">{impactText}</p> : null}
       </section>
 
       <section className="card" id="lp">
@@ -643,7 +648,7 @@ function App() {
       </section>
 
       <section className="card" id="sim">
-        <h2>多账户模拟</h2>
+        <h2 title="1 到 20 号账户。0 号是我自己，别让脚本把初始池子撤了">多账户模拟</h2>
         <p className="note">
           用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。
         </p>
@@ -671,7 +676,9 @@ function App() {
       </section>
 
       <section className="card" id="arb">
-        <h2>原子套利</h2>
+        <h2 title="一笔交易走完。中间失败就当没发生">
+          原子套利<span className="nick">搬砖</span>
+        </h2>
         <p className="note">
           合约会比较两个交易所，在更便宜的一边买入，再到另一边卖出。赚不到钱就整笔回滚。这里用的是 ERC20，ETH 池请选 WETH，并先包装。
         </p>
@@ -774,8 +781,48 @@ function App() {
           {logs.length === 0 ? <div>还没有操作。</div> : logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
         </div>
       </section>
+      <footer className="foot">
+        浙大区块链作业2 · MiniDEX
+        <span className="sid" title="交作业前改成自己的">学号 TODO</span>
+      </footer>
     </div>
   );
+}
+
+// 用页面上看到的储备估一下，不另发请求。差价里已经含 0.3% 手续费。
+function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId, swapOut: SideId, swapAmt: string) {
+  if (pools.length === 0) return '';
+  let amount: bigint;
+  try {
+    amount = parseAmount(swapAmt);
+  } catch {
+    return '';
+  }
+  if (amount === 0n) return '';
+  const left = resolveSide(swapIn);
+  const right = resolveSide(swapOut);
+  if (same(left.address, right.address)) return '';
+  const pool = pools.find((row) => {
+    if (row.exchangeIndex !== exchangeIndex) return false;
+    const a = row.token0.toLowerCase();
+    const b = row.token1.toLowerCase();
+    const i = left.address.toLowerCase();
+    const o = right.address.toLowerCase();
+    return (a === i && b === o) || (a === o && b === i);
+  });
+  if (!pool) return '这个交易所还没有这对池子。';
+  const reserveIn = pool.token0.toLowerCase() === left.address.toLowerCase() ? pool.reserve0 : pool.reserve1;
+  const reserveOut = pool.token0.toLowerCase() === left.address.toLowerCase() ? pool.reserve1 : pool.reserve0;
+  if (reserveIn === 0n || reserveOut === 0n) return '池子几乎空了，这单别硬换。';
+  const out = (reserveOut * amount * 997n) / (reserveIn * 1000n + amount * 997n);
+  if (out === 0n) return '按现在的储备，换出来会是 0。';
+  const ideal = amount * reserveOut;
+  const got = out * reserveIn;
+  if (got >= ideal) return '';
+  const bps = ((ideal - got) * 10000n) / ideal;
+  const whole = (bps / 100n).toString();
+  const frac = (bps % 100n).toString().padStart(2, '0');
+  return `比池子现价大约少 ${whole}.${frac}%，0.3% 手续费算在里面。`;
 }
 
 async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId, amount: bigint): Promise<ArbView> {
@@ -810,6 +857,13 @@ async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId,
 function ArbBox({ view }: { view: ArbView }) {
   return (
     <div className="arb-box">
+      <div className="arb-path" title="同一笔交易里按这个顺序走">
+        <span className="step">{view.tokenIn}</span>
+        <span className="hop">买入 · {view.buyName || '—'}</span>
+        <span className="step">{fmt(view.amountBought)} {view.tokenOut}</span>
+        <span className="hop">卖出 · {view.sellName || '—'}</span>
+        <span className="step">{fmt(view.amountBack)} {view.tokenIn}</span>
+      </div>
       <div>
         {view.source}
         {view.profitable ? `，预计利润 ${fmt(view.profit)} ${view.tokenIn}` : '，当前没有正利润'}
