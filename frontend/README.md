@@ -1,6 +1,6 @@
 # MiniDEX 前端
 
-Vite + React。页面读 `src/deployments/localhost.json`，所以要先在 `contracts` 里启动节点并部署。完整步骤在仓库根目录的 README。
+Vite + React。默认读 `src/deployments/localhost.json`。钱包在 Sepolia（11155111）时改读 `sepolia.json`。完整步骤在仓库根目录的 README。
 
 ```bash
 npm ci

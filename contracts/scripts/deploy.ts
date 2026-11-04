@@ -9,19 +9,35 @@ async function main() {
   const deployerAddr = await deployer.getAddress();
   console.log(`deployer ${deployerAddr}`);
 
+  const network = await ethers.provider.getNetwork();
+  const chainId = Number(network.chainId);
+  const sepolia = chainId === 11155111;
+  if (sepolia) {
+    const bal = await ethers.provider.getBalance(deployerAddr);
+    console.log(`sepolia ETH ${formatEther(bal)}。gas 和池子里的 ETH 都从这里扣。`);
+    if (bal < parseEther("0.01")) {
+      throw new Error("Sepolia ETH 太少。先去水龙头领测试币，再部署。");
+    }
+  }
+
   const tokenA = await deploy(ethers, "TestERC20", ["Token A", "TKA", deployerAddr]);
   const tokenB = await deploy(ethers, "TestERC20", ["Token B", "TKB", deployerAddr]);
   const weth = await deploy(ethers, "WETH");
-  const faucet = await deploy(ethers, "EthFaucet", [], { value: parseEther("100") });
+  // 本地水龙头里放 100 ETH。Sepolia 不往里面打钱，页面上也不显示领币按钮。
+  const faucet = await deploy(ethers, "EthFaucet", [], sepolia ? {} : { value: parseEther("100") });
 
   const dexA = await deployExchange(ethers, deployerAddr, weth, "MiniDEX-A", "MDA-LP");
   const dexB = await deployExchange(ethers, deployerAddr, weth, "MiniDEX-B", "MDB-LP");
   const arb = await deploy(ethers, "AtomicArbitrage");
 
-  await (await tokenA.mint(deployerAddr, parseEther("1000000"))).wait();
-  await (await tokenB.mint(deployerAddr, parseEther("1000000"))).wait();
-  // TKA/WETH 两个池一共 13 ETH。TKB/ETH 留给前端自己创建。
-  await (await weth.deposit({ value: parseEther("13") })).wait();
+  // Sepolia 只铸够铺池和自己试一笔。本地仍然是大数，方便 20 个账户模拟。
+  const mintA = sepolia ? parseEther("4000") : parseEther("1000000");
+  const mintB = sepolia ? parseEther("4000") : parseEther("1000000");
+  const wrapEth = sepolia ? parseEther("0.025") : parseEther("13");
+  await (await tokenA.mint(deployerAddr, mintA)).wait();
+  await (await tokenB.mint(deployerAddr, mintB)).wait();
+  // TKB/ETH 留给前端自己创建。Sepolia 的 ETH 池只有 0.01 和 0.015。
+  await (await weth.deposit({ value: wrapEth })).wait();
 
   const tokenAAddr = await tokenA.getAddress();
   const tokenBAddr = await tokenB.getAddress();
@@ -34,19 +50,27 @@ async function main() {
     await (await weth.approve(routerAddr, MaxUint256)).wait();
   }
 
-  await seed(dexA, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("10000"), deployerAddr, "TKA/TKB 10000/10000");
-  await seed(dexB, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("20000"), deployerAddr, "TKA/TKB 10000/20000");
-  await seed(dexA, tokenAAddr, wethAddr, parseEther("5000"), parseEther("5"), deployerAddr, "TKA/WETH 5000/5");
-  await seed(dexB, tokenAAddr, wethAddr, parseEther("5000"), parseEther("8"), deployerAddr, "TKA/WETH 5000/8");
+  if (sepolia) {
+    await seed(dexA, tokenAAddr, tokenBAddr, parseEther("1000"), parseEther("1000"), deployerAddr, "TKA/TKB 1000/1000");
+    await seed(dexB, tokenAAddr, tokenBAddr, parseEther("1000"), parseEther("2000"), deployerAddr, "TKA/TKB 1000/2000");
+    await seed(dexA, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.01"), deployerAddr, "TKA/WETH 100/0.01");
+    await seed(dexB, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.015"), deployerAddr, "TKA/WETH 100/0.015");
+  } else {
+    await seed(dexA, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("10000"), deployerAddr, "TKA/TKB 10000/10000");
+    await seed(dexB, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("20000"), deployerAddr, "TKA/TKB 10000/20000");
+    await seed(dexA, tokenAAddr, wethAddr, parseEther("5000"), parseEther("5"), deployerAddr, "TKA/WETH 5000/5");
+    await seed(dexB, tokenAAddr, wethAddr, parseEther("5000"), parseEther("8"), deployerAddr, "TKA/WETH 5000/8");
+  }
 
+  const previewAmount = sepolia ? parseEther("100") : parseEther("1000");
   const plan = await arb.preview(
     await dexA.router.getAddress(),
     await dexB.router.getAddress(),
     tokenAAddr,
     tokenBAddr,
-    parseEther("1000"),
+    previewAmount,
   );
-  console.log("--- 套利预览：花 1000 TKA 买 TKB ---");
+  console.log(`--- 套利预览：花 ${sepolia ? "100" : "1000"} TKA 买 TKB ---`);
   console.log(`profitable ${plan.profitable}`);
   console.log(`buyRouter ${plan.buyRouter}`);
   console.log(`sellRouter ${plan.sellRouter}`);
@@ -58,10 +82,12 @@ async function main() {
   console.log(`priceBuyAfter ${formatEther(plan.priceBuyAfter)}`);
   console.log(`priceSellAfter ${formatEther(plan.priceSellAfter)}`);
 
-  const network = await ethers.provider.getNetwork();
   const deployment = {
-    chainId: Number(network.chainId),
-    rpcUrl: "http://127.0.0.1:8545",
+    chainId,
+    // 页面连上 MetaMask 后走钱包节点。这里不写带 key 的 RPC，也不写私钥。
+    rpcUrl: sepolia ? "https://rpc.sepolia.org" : "http://127.0.0.1:8545",
+    ready: true,
+    localFaucet: !sepolia,
     tokens: {
       TKA: {
         address: tokenAAddr,
@@ -109,7 +135,7 @@ async function main() {
 
   const outDir = path.resolve("..", "frontend", "src", "deployments");
   mkdirSync(outDir, { recursive: true });
-  const outFile = path.join(outDir, "localhost.json");
+  const outFile = path.join(outDir, sepolia ? "sepolia.json" : "localhost.json");
   writeFileSync(outFile, `${JSON.stringify(deployment, null, 2)}\n`);
   console.log(`wrote ${outFile}`);
 }

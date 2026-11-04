@@ -1,12 +1,68 @@
 import { Contract, MaxUint256, type Provider, type Signer } from "ethers";
-import deploymentJson from "./deployments/localhost.json";
+import localhostJson from "./deployments/localhost.json";
+import sepoliaJson from "./deployments/sepolia.json";
 
-export const deployment = deploymentJson;
-export const abis = deploymentJson.abis;
+export const HARDHAT_CHAIN_ID = 31337;
+export const SEPOLIA_CHAIN_ID = 11155111;
 
-export const TKA = deployment.tokens.TKA.address;
-export const TKB = deployment.tokens.TKB.address;
-export const WETH = deployment.tokens.WETH.address;
+export const abis = localhostJson.abis;
+
+export type DexDeployment = {
+  chainId: number;
+  rpcUrl: string;
+  ready: boolean;
+  localFaucet: boolean;
+  tokens: {
+    TKA: { address: string; name: string; symbol: string };
+    TKB: { address: string; name: string; symbol: string };
+    WETH: { address: string; name: string; symbol: string };
+  };
+  ethFaucet: string;
+  exchanges: { name: string; factory: string; router: string; nft: string }[];
+  arbitrage: string;
+};
+
+function asDeployment(
+  file: {
+    chainId: number;
+    rpcUrl: string;
+    ready?: boolean;
+    localFaucet?: boolean;
+    tokens: DexDeployment["tokens"];
+    ethFaucet: string;
+    exchanges: DexDeployment["exchanges"];
+    arbitrage: string;
+  },
+  fallback: { ready: boolean; localFaucet: boolean },
+): DexDeployment {
+  return {
+    chainId: file.chainId,
+    rpcUrl: file.rpcUrl,
+    ready: file.ready ?? fallback.ready,
+    localFaucet: file.localFaucet ?? fallback.localFaucet,
+    tokens: file.tokens,
+    ethFaucet: file.ethFaucet,
+    exchanges: file.exchanges,
+    arbitrage: file.arbitrage,
+  };
+}
+
+export const localhostDeployment = asDeployment(localhostJson, { ready: true, localFaucet: true });
+export const sepoliaDeployment = asDeployment(sepoliaJson, { ready: false, localFaucet: false });
+
+// 作业默认走本地。只有钱包明确停在 Sepolia 才换那份地址。
+export function deploymentForChain(chainId: number | null): DexDeployment | null {
+  if (chainId === SEPOLIA_CHAIN_ID) return sepoliaDeployment;
+  if (chainId === HARDHAT_CHAIN_ID) return localhostDeployment;
+  return null;
+}
+
+export function networkLabel(chainId: number | null) {
+  if (chainId === HARDHAT_CHAIN_ID) return "Hardhat 本地";
+  if (chainId === SEPOLIA_CHAIN_ID) return "Sepolia";
+  if (chainId === null) return "未选择网络";
+  return `chain ${chainId}`;
+}
 
 const ONE = 10n ** 18n;
 
@@ -56,22 +112,23 @@ export function fmtTime(ts: bigint) {
 
 export type SideId = "TKA" | "TKB" | "ETH" | "WETH";
 
-export function resolveSide(id: SideId) {
-  if (id === "ETH") return { address: WETH, native: true, symbol: "ETH" };
-  if (id === "WETH") return { address: WETH, native: false, symbol: "WETH" };
-  if (id === "TKA") return { address: TKA, native: false, symbol: "TKA" };
-  return { address: TKB, native: false, symbol: "TKB" };
+export function resolveSide(dep: DexDeployment, id: SideId) {
+  const weth = dep.tokens.WETH.address;
+  if (id === "ETH") return { address: weth, native: true, symbol: "ETH" };
+  if (id === "WETH") return { address: weth, native: false, symbol: "WETH" };
+  if (id === "TKA") return { address: dep.tokens.TKA.address, native: false, symbol: "TKA" };
+  return { address: dep.tokens.TKB.address, native: false, symbol: "TKB" };
 }
 
-export function displaySymbol(addr: string) {
-  if (same(addr, WETH)) return "ETH";
-  if (same(addr, TKA)) return "TKA";
-  if (same(addr, TKB)) return "TKB";
+export function displaySymbol(dep: DexDeployment, addr: string) {
+  if (same(addr, dep.tokens.WETH.address)) return "ETH";
+  if (same(addr, dep.tokens.TKA.address)) return "TKA";
+  if (same(addr, dep.tokens.TKB.address)) return "TKB";
   return short(addr);
 }
 
-export function exchangeNameOfRouter(addr: string) {
-  const found = deployment.exchanges.find((item) => same(item.router, addr));
+export function exchangeNameOfRouter(dep: DexDeployment, addr: string) {
+  const found = dep.exchanges.find((item) => same(item.router, addr));
   return found ? found.name : short(addr);
 }
 
@@ -114,10 +171,10 @@ export type PositionRow = {
   createdAt: bigint;
 };
 
-export async function loadPools(provider: Provider): Promise<PoolRow[]> {
+export async function loadPools(dep: DexDeployment, provider: Provider): Promise<PoolRow[]> {
   const rows: PoolRow[] = [];
-  for (let i = 0; i < deployment.exchanges.length; i++) {
-    const ex = deployment.exchanges[i];
+  for (let i = 0; i < dep.exchanges.length; i++) {
+    const ex = dep.exchanges[i];
     const factory = bind(ex.factory, abis.factory, provider);
     const count = Number(await factory.allPairsLength());
     for (let j = 0; j < count; j++) {
@@ -141,12 +198,13 @@ export async function loadPools(provider: Provider): Promise<PoolRow[]> {
 }
 
 async function readPosition(
+  dep: DexDeployment,
   provider: Provider,
   exchangeIndex: number,
   tokenId: bigint,
   owner: string,
 ): Promise<PositionRow> {
-  const ex = deployment.exchanges[exchangeIndex];
+  const ex = dep.exchanges[exchangeIndex];
   const nft = bind(ex.nft, abis.nft, provider);
   const pos = await nft.getPosition(tokenId);
   const pair = bind(pos.pair as string, abis.pair, provider);
@@ -169,33 +227,33 @@ async function readPosition(
   };
 }
 
-export async function loadMyNfts(provider: Provider, owner: string) {
+export async function loadMyNfts(dep: DexDeployment, provider: Provider, owner: string) {
   const rows: PositionRow[] = [];
-  for (let i = 0; i < deployment.exchanges.length; i++) {
-    const nft = bind(deployment.exchanges[i].nft, abis.nft, provider);
+  for (let i = 0; i < dep.exchanges.length; i++) {
+    const nft = bind(dep.exchanges[i].nft, abis.nft, provider);
     const ids = (await nft.tokensOfOwner(owner)) as bigint[];
     for (const tokenId of ids) {
-      rows.push(await readPosition(provider, i, tokenId, owner));
+      rows.push(await readPosition(dep, provider, i, tokenId, owner));
     }
   }
   return rows;
 }
 
-export async function loadLps(provider: Provider, exchangeIndex: number, pair: string) {
-  const nft = bind(deployment.exchanges[exchangeIndex].nft, abis.nft, provider);
+export async function loadLps(dep: DexDeployment, provider: Provider, exchangeIndex: number, pair: string) {
+  const nft = bind(dep.exchanges[exchangeIndex].nft, abis.nft, provider);
   const ids = (await nft.tokensOfPair(pair)) as bigint[];
   const rows: PositionRow[] = [];
   for (const tokenId of ids) {
     const owner = (await nft.ownerOf(tokenId)) as string;
-    rows.push(await readPosition(provider, exchangeIndex, tokenId, owner));
+    rows.push(await readPosition(dep, provider, exchangeIndex, tokenId, owner));
   }
   return rows;
 }
 
-export async function loadBalances(provider: Provider, owner: string) {
-  const tka = bind(TKA, abis.erc20, provider);
-  const tkb = bind(TKB, abis.erc20, provider);
-  const weth = bind(WETH, abis.weth, provider);
+export async function loadBalances(dep: DexDeployment, provider: Provider, owner: string) {
+  const tka = bind(dep.tokens.TKA.address, abis.erc20, provider);
+  const tkb = bind(dep.tokens.TKB.address, abis.erc20, provider);
+  const weth = bind(dep.tokens.WETH.address, abis.weth, provider);
   const [eth, wethBal, tkaBal, tkbBal] = await Promise.all([
     provider.getBalance(owner),
     weth.balanceOf(owner) as Promise<bigint>,

@@ -1,6 +1,6 @@
 import { Contract, FetchRequest, HDNodeWallet, JsonRpcProvider } from "ethers";
 import { runSimulation } from "../../contracts/scripts/simlib";
-import { abis, deployment } from "./chain";
+import { abis, localhostDeployment as deployment } from "./chain";
 
 // Hardhat 默认公开助记词，只给本地 31337 用。
 export const HARDHAT_MNEMONIC = "test test test test test test test test test test test junk";
