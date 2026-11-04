@@ -113,7 +113,7 @@ TKB/ETH 没建。创建池子那个按钮得有个空的可以点。
 
 ## 截图
 
-本地 Hardhat 上点的。套利那张是成交前的预览，后面几张是接着操作的。
+本地 Hardhat 上点的。页面用的是深色，兑换卡片在最上面，池子和钱包在旁边。套利那张是成交前的预览，后面几张是接着操作的。
 
 页头。标题停一下会有一行字，控制台里我也留了一句。
 
@@ -151,7 +151,7 @@ MiniDEX-A 的 TKA/TKB。可取的比当初放进去少一点点，是锁了 1000
 
 ![水龙头](docs/screenshots/08-faucet.png)
 
-自己建的 MiniDEX-A TKB/ETH，1 ETH 配 1000 TKB：
+自己建的 MiniDEX-A，1 ETH 配 1000 TKB。合约会把代币排成 ETH/TKB：
 
 ![创建池子](docs/screenshots/09-create-pool.png)
 
@@ -163,7 +163,7 @@ MiniDEX-A 的 TKA/TKB。可取的比当初放进去少一点点，是锁了 1000
 
 ![模拟记录](docs/screenshots/13-log.png)
 
-窄一点的时候表单会换行：
+窄屏时兑换卡片在上，池子表可以横滑，第一列钉住：
 
 ![窄屏](docs/screenshots/14-mobile-pools.png)
 
