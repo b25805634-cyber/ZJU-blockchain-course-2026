@@ -1,10 +1,14 @@
+html {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
-  background: #efeae1;
-  color: #1a2332;
-  font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: #0c1016;
+  color: #edf2f7;
+  font-family: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Segoe UI", sans-serif;
   font-size: 15px;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 button,

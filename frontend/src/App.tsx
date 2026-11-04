@@ -44,12 +44,18 @@ type ArbView = {
   source: string;
 };
 
+type Impact = { text: string; bps: bigint };
+
 const emptyBal = { eth: 0n, weth: 0n, tka: 0n, tkb: 0n };
+const swapSides: SideId[] = ['TKA', 'TKB', 'ETH'];
+const arbSides: SideId[] = ['TKA', 'TKB', 'WETH'];
 
 function App() {
   const signerRef = useRef<Signer | null>(null);
   const providerRef = useRef<Provider | null>(null);
   const selectedRef = useRef('');
+  const quoteGen = useRef(0);
+  const pickGen = useRef(0);
 
   const [address, setAddress] = useState('');
   const [chainId, setChainId] = useState<number | null>(null);
@@ -74,6 +80,7 @@ function App() {
   const [swapAmt, setSwapAmt] = useState('10');
   const [slippage, setSlippage] = useState('1');
   const [quoteText, setQuoteText] = useState('');
+  const [quoteOut, setQuoteOut] = useState<bigint | null>(null);
 
   const [add0, setAdd0] = useState('100');
   const [add1, setAdd1] = useState('100');
@@ -83,6 +90,7 @@ function App() {
   const [arbAmt, setArbAmt] = useState('1000');
   const [arbView, setArbView] = useState<ArbView | null>(null);
   const [wrapAmt, setWrapAmt] = useState('1');
+  const [lpPending, setLpPending] = useState('');
 
   function pushLog(line: string) {
     setLogs((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 80));
@@ -94,15 +102,23 @@ function App() {
       selectedRef.current && rows.some((row) => row.key === selectedRef.current)
         ? selectedRef.current
         : (rows[0]?.key ?? '');
-    selectedRef.current = key;
-    setPools(rows);
-    setSelected(key);
     const pool = rows.find((row) => row.key === key);
-    setLps(pool ? await loadLps(provider, pool.exchangeIndex, pool.pair) : []);
-    if (owner) {
-      setBalances(await loadBalances(provider, owner));
-      setNfts(await loadMyNfts(provider, owner));
+    const nextLps = pool ? await loadLps(provider, pool.exchangeIndex, pool.pair) : [];
+    const nextBal = owner ? await loadBalances(provider, owner) : null;
+    const nextNfts = owner ? await loadMyNfts(provider, owner) : null;
+    const liveKey =
+      selectedRef.current && rows.some((row) => row.key === selectedRef.current) ? selectedRef.current : key;
+    setPools(rows);
+    if (nextBal && nextNfts) {
+      setBalances(nextBal);
+      setNfts(nextNfts);
     }
+    // 读取期间又点了别的池子，别把旧表盖回去。
+    if (liveKey !== key) return;
+    selectedRef.current = key;
+    setSelected(key);
+    setLps(nextLps);
+    setLpPending('');
   }
 
   useEffect(() => {
@@ -198,34 +214,69 @@ function App() {
   }
 
   async function onChoose(key: string) {
-    selectedRef.current = key;
-    setSelected(key);
     const pool = pools.find((row) => row.key === key);
-    const provider = providerRef.current ?? rpcProvider();
     if (!pool) return;
+    const gen = ++pickGen.current;
+    const previous = selectedRef.current;
+    selectedRef.current = key;
+    setLpPending(`正在读取 ${pool.exchangeName} · ${displaySymbol(pool.token0)} / ${displaySymbol(pool.token1)}`);
+    const provider = providerRef.current ?? rpcProvider();
     try {
-      setLps(await loadLps(provider, pool.exchangeIndex, pool.pair));
+      const rows = await loadLps(provider, pool.exchangeIndex, pool.pair);
+      if (gen !== pickGen.current) return;
+      setSelected(key);
+      setLps(rows);
+      setLpPending('');
     } catch (err) {
+      if (gen !== pickGen.current) return;
+      selectedRef.current = previous;
+      setLpPending('');
       setError(errText(err));
     }
   }
 
   const shownPools = pools.filter((pool) => poolFilter < 0 || pool.exchangeIndex === poolFilter);
   const current = pools.find((pool) => pool.key === selected);
+  const impact = describeImpact(pools, exchangeIndex, swapIn, swapOut, swapAmt);
 
   async function quoteSwap() {
-    const provider = providerRef.current ?? rpcProvider();
+    const gen = ++quoteGen.current;
     const left = resolveSide(swapIn);
     const right = resolveSide(swapOut);
     if (same(left.address, right.address)) throw new Error('两个代币不能一样');
+    const provider = providerRef.current ?? rpcProvider();
     const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, provider);
     const amount = parseAmount(swapAmt);
     const out = (await router.quote(left.address, right.address, amount)) as bigint;
+    if (gen !== quoteGen.current) return null;
+    setQuoteOut(out);
     setQuoteText(`预计获得 ${fmt(out)} ${right.symbol}`);
     return { out, amount, left, right };
   }
 
-  const impactText = describeImpact(pools, exchangeIndex, swapIn, swapOut, swapAmt);
+  useEffect(() => {
+    if (pools.length === 0) return;
+    let cancelled = false;
+    setQuoteOut(null);
+    const timer = window.setTimeout(() => {
+      quoteSwap()
+        .then((res) => {
+          if (cancelled || res) return;
+          setQuoteOut(null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setQuoteOut(null);
+          setQuoteText(errText(err));
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // 输入变了再报价。函数本身每次渲染都是新的，放进依赖会转圈。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pools, swapIn, swapOut, swapAmt, exchangeIndex]);
 
   function minOut(quoted: bigint) {
     const pct = Number(slippage);
@@ -234,602 +285,723 @@ function App() {
     return (quoted * (10000n - bps)) / 10000n;
   }
 
+  function sideBalance(side: SideId) {
+    if (side === 'TKA') return balances.tka;
+    if (side === 'TKB') return balances.tkb;
+    if (side === 'WETH') return balances.weth;
+    return balances.eth;
+  }
+
+  function flipSides() {
+    setSwapIn(swapOut);
+    setSwapOut(swapIn);
+  }
+
+  const impactClass = !impact ? '' : impact.bps >= 500n ? 'impact bad' : impact.bps >= 100n ? 'impact hot' : 'impact';
+
   return (
-    <div className="page">
-      <header className="top">
-        <div>
-          <p className="kicker">浙大区块链作业2</p>
-          <h1 title="玉泉机房周末版，别部署到主网">MiniDEX</h1>
-          <p className="lede">恒定乘积。流动性记在 NFT 上，手续费 0.3% 留在池子里。</p>
+    <div className="app">
+      <header className="bar">
+        <div className="bar-inner">
+          <div className="brand">
+            <span className="mark" aria-hidden="true">
+              M
+            </span>
+            <div>
+              <h1 title="玉泉机房周末版，别部署到主网">MiniDEX</h1>
+              <p className="kicker">浙大区块链作业2</p>
+            </div>
+          </div>
+          <nav className="nav">
+            <a href="#swap">兑换</a>
+            <a href="#pools">池子</a>
+            <a href="#lp">流动性</a>
+            <a href="#sim">模拟</a>
+            <a href="#arb">套利</a>
+          </nav>
+          <div className="bar-status">{address ? `${short(address)} · ${chainId ?? '-'}` : '未连接'}</div>
         </div>
       </header>
-      <nav className="nav">
-        <a href="#wallet">钱包</a>
-        <a href="#pools">交易池</a>
-        <a href="#swap">兑换</a>
-        <a href="#lp">流动性</a>
-        <a href="#sim">模拟</a>
-        <a href="#arb">套利</a>
-      </nav>
-      {error ? <div className="error">{error}</div> : null}
 
-      <section className="card" id="wallet">
-        <h2>钱包和水龙头</h2>
-        <div className="toolbar">
-          <button disabled={busy} onClick={() => run('连接钱包', connectMetaMask)}>
-            连接 MetaMask
-          </button>
-          <button className="ghost" disabled={busy} onClick={() => run('本地账户', connectLocal)}>
-            使用本地测试账户
-          </button>
-          <button
-            className="ghost"
-            disabled={busy}
-            onClick={() =>
-              run('刷新', async () => {
-                const provider = providerRef.current ?? rpcProvider();
-                providerRef.current = providerRef.current ?? provider;
-                await reload(provider, address);
-              })
-            }
-          >
-            刷新
-          </button>
-          <span className="muted">
-            {address ? `${short(address)} · chain ${chainId ?? '-'}` : '还没连接'}
-          </span>
-        </div>
-        <div className="balances">
-          <div>
-            <span className="sym">ETH</span>
-            <strong>{fmt(balances.eth)}</strong>
-          </div>
-          <div>
-            <span className="sym">WETH</span>
-            <strong>{fmt(balances.weth)}</strong>
-          </div>
-          <div>
-            <span className="sym">TKA</span>
-            <strong>{fmt(balances.tka)}</strong>
-          </div>
-          <div>
-            <span className="sym">TKB</span>
-            <strong>{fmt(balances.tkb)}</strong>
-          </div>
-        </div>
-        <div className="actions">
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('领取 ETH', async () => {
-                const signer = needSigner();
-                const faucet = bind(deployment.ethFaucet, abis.faucet, signer);
-                await (await faucet.claim()).wait();
-              })
-            }
-          >
-            领 5 ETH
-          </button>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('领取 TKA', async () => {
-                const signer = needSigner();
-                await (await bind(TKA, abis.erc20, signer).claim()).wait();
-              })
-            }
-          >
-            领 TKA
-          </button>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('领取 TKB', async () => {
-                const signer = needSigner();
-                await (await bind(TKB, abis.erc20, signer).claim()).wait();
-              })
-            }
-          >
-            领 TKB
-          </button>
-          <label>
-            包装 / 拆包
-            <input value={wrapAmt} onChange={(e) => setWrapAmt(e.target.value)} />
-          </label>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('包装 ETH', async () => {
-                const signer = needSigner();
-                const weth = bind(WETH, abis.weth, signer);
-                await (await weth.deposit({ value: parseAmount(wrapAmt) })).wait();
-              })
-            }
-          >
-            包装成 WETH
-          </button>
-          <button
-            className="ghost"
-            disabled={busy || !address}
-            onClick={() =>
-              run('拆包 WETH', async () => {
-                const signer = needSigner();
-                const weth = bind(WETH, abis.weth, signer);
-                await (await weth.withdraw(parseAmount(wrapAmt))).wait();
-              })
-            }
-          >
-            拆回 ETH
-          </button>
-        </div>
-        <p className="note">
-          每个地址 TKA、TKB 最多领 3 次，每次 10000。ETH 水龙头每个地址 1 次。本地按钮用的是 Hardhat 公开测试账户，不要拿到别的网络。
-        </p>
-      </section>
-
-      <section className="card" id="pools">
-        <h2>交易池</h2>
-        <div className="fields compact">
-          <label>
-            筛选交易所
-            <select value={poolFilter} onChange={(e) => setPoolFilter(Number(e.target.value))}>
-              <option value={-1}>全部</option>
-              {deployment.exchanges.map((ex, index) => (
-                <option value={index} key={ex.name}>
-                  {ex.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>交易所</th>
-                <th>交易对</th>
-                <th>储备</th>
-                <th>价格</th>
-                <th>份额</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shownPools.length === 0 ? (
-                <tr>
-                  <td colSpan={5}>还没有池子。</td>
-                </tr>
-              ) : (
-                shownPools.map((pool) => (
-                  <tr
-                    key={pool.key}
-                    className={pool.key === selected ? 'picked clickable' : 'clickable'}
-                    onClick={() => onChoose(pool.key)}
+      <main className="shell">
+        <div className="stage">
+          <section className="swap-card" id="swap">
+            <div className="swap-head">
+              <h2>兑换</h2>
+              <div className="seg" role="tablist" aria-label="交易所">
+                {deployment.exchanges.map((ex, index) => (
+                  <button
+                    type="button"
+                    key={ex.name}
+                    role="tab"
+                    aria-selected={exchangeIndex === index}
+                    onClick={() => setExchangeIndex(index)}
                   >
-                    <td>{pool.exchangeName}</td>
-                    <td>
-                      {displaySymbol(pool.token0)} / {displaySymbol(pool.token1)}
-                    </td>
-                    <td>
-                      {fmt(pool.reserve0)} / {fmt(pool.reserve1)}
-                    </td>
-                    <td>
-                      1 {displaySymbol(pool.token0)} = {pool.reserve0 === 0n ? '-' : fmt((pool.reserve1 * 10n ** 18n) / pool.reserve0)}{' '}
-                      {displaySymbol(pool.token1)}
-                    </td>
-                    <td>{fmt(pool.totalShares)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p className="note">点一行可以看到这个池子的流动性来源。ETH 池底层是 WETH。</p>
-
-        <div className="split">
-        <h2 className="sub">创建交易池</h2>
-        <div className="fields">
-          <label>
-            交易所
-            <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
-              {deployment.exchanges.map((ex, index) => (
-                <option value={index} key={ex.name}>
-                  {ex.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            代币 A
-            <select value={createLeft} onChange={(e) => setCreateLeft(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>ETH</option>
-            </select>
-          </label>
-          <label>
-            数量 A
-            <input value={createAmtLeft} onChange={(e) => setCreateAmtLeft(e.target.value)} />
-          </label>
-          <label>
-            代币 B
-            <select value={createRight} onChange={(e) => setCreateRight(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>ETH</option>
-            </select>
-          </label>
-          <label>
-            数量 B
-            <input value={createAmtRight} onChange={(e) => setCreateAmtRight(e.target.value)} />
-          </label>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('创建池子', async () => {
-                const signer = needSigner();
-                const me = await signer.getAddress();
-                const left = resolveSide(createLeft);
-                const right = resolveSide(createRight);
-                if (same(left.address, right.address)) throw new Error('不能用同一个代币建池');
-                const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
-                const amountLeft = parseAmount(createAmtLeft);
-                const amountRight = parseAmount(createAmtRight);
-                if (left.native || right.native) {
-                  const token = left.native ? right : left;
-                  const amountToken = left.native ? amountRight : amountLeft;
-                  const value = left.native ? amountLeft : amountRight;
-                  const erc20 = bind(token.address, abis.erc20, signer);
-                  await ensureApprove(erc20, me, await router.getAddress(), amountToken);
-                  await (
-                    await router.createPairAndAddLiquidityETH(token.address, amountToken, me, { value })
-                  ).wait();
-                } else {
-                  await ensureApprove(bind(left.address, abis.erc20, signer), me, await router.getAddress(), amountLeft);
-                  await ensureApprove(bind(right.address, abis.erc20, signer), me, await router.getAddress(), amountRight);
-                  await (
-                    await router.createPairAndAddLiquidity(left.address, right.address, amountLeft, amountRight, me)
-                  ).wait();
-                }
-              })
-            }
-          >
-            创建并添加流动性
-          </button>
-        </div>
-        <p className="note">池子已经存在时，这个按钮只会按当前比例继续加流动性。TKB/ETH 部署后还是空的，可以自己建。</p>
-        </div>
-      </section>
-
-      <section className="card" id="swap">
-        <h2>兑换</h2>
-        <div className="fields compact">
-          <label>
-            交易所
-            <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
-              {deployment.exchanges.map((ex, index) => (
-                <option value={index} key={ex.name}>
-                  {ex.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div className="swap-grid">
-          <div className="swap-side">
-            <label>
-              支付
-              <select value={swapIn} onChange={(e) => setSwapIn(e.target.value as SideId)}>
-                <option>TKA</option>
-                <option>TKB</option>
-                <option>ETH</option>
-              </select>
-            </label>
-            <label>
-              数量
-              <input value={swapAmt} onChange={(e) => setSwapAmt(e.target.value)} />
-            </label>
-          </div>
-          <div className="swap-side">
-            <label>
-              获得
-              <select value={swapOut} onChange={(e) => setSwapOut(e.target.value as SideId)}>
-                <option>TKA</option>
-                <option>TKB</option>
-                <option>ETH</option>
-              </select>
-            </label>
-            <label>
-              滑点 %
-              <input value={slippage} onChange={(e) => setSlippage(e.target.value)} />
-            </label>
-          </div>
-        </div>
-        <div className="swap-actions">
-          <button
-            className="ghost"
-            disabled={busy}
-            onClick={() =>
-              run('报价', async () => {
-                await quoteSwap();
-              })
-            }
-          >
-            报价
-          </button>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('兑换', async () => {
-                const signer = needSigner();
-                const me = await signer.getAddress();
-                const quoted = await quoteSwap();
-                const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
-                const min = minOut(quoted.out);
-                if (quoted.left.native) {
-                  await (
-                    await router.swapExactETHForTokens(quoted.right.address, min, me, { value: quoted.amount })
-                  ).wait();
-                } else if (quoted.right.native) {
-                  await ensureApprove(bind(quoted.left.address, abis.erc20, signer), me, await router.getAddress(), quoted.amount);
-                  await (await router.swapExactTokensForETH(quoted.left.address, quoted.amount, min, me)).wait();
-                } else {
-                  await ensureApprove(bind(quoted.left.address, abis.erc20, signer), me, await router.getAddress(), quoted.amount);
-                  await (
-                    await router.swapExactTokensForTokens(
-                      quoted.left.address,
-                      quoted.right.address,
-                      quoted.amount,
-                      min,
-                      me,
-                    )
-                  ).wait();
-                }
-              })
-            }
-          >
-            兑换
-          </button>
-        </div>
-        {quoteText ? <p className="quote">{quoteText}</p> : null}
-        {impactText ? <p className="note">{impactText}</p> : null}
-      </section>
-
-      <section className="card" id="lp">
-        <h2>池子里的流动性来源</h2>
-        {current ? (
-          <p className="note">
-            {current.exchangeName} · {displaySymbol(current.token0)} / {displaySymbol(current.token1)}
-          </p>
-        ) : (
-          <p className="note">先在上面选一个池子。</p>
-        )}
-        <PositionTable rows={lps} showOwner />
-        {current ? (
-          <div className="fields">
-            <label>
-              {displaySymbol(current.token0)}
-              <input value={add0} onChange={(e) => setAdd0(e.target.value)} />
-            </label>
-            <label>
-              {displaySymbol(current.token1)}
-              <input value={add1} onChange={(e) => setAdd1(e.target.value)} />
-            </label>
+                    {ex.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="slip">
+              <span>滑点容忍</span>
+              <input aria-label="滑点百分比" value={slippage} onChange={(e) => setSlippage(e.target.value)} />
+              <span>%</span>
+            </div>
+            <div className="wells">
+              <div className="token-box">
+                <div className="token-meta">
+                  <span>支付</span>
+                  <span className="num">{address ? `余额 ${fmt(sideBalance(swapIn))}` : '未连接'}</span>
+                </div>
+                <div className="token-row">
+                  <input
+                    className="amount"
+                    aria-label="支付数量"
+                    value={swapAmt}
+                    onChange={(e) => setSwapAmt(e.target.value)}
+                  />
+                  <select
+                    className="token-pill"
+                    aria-label="支付代币"
+                    value={swapIn}
+                    onChange={(e) => setSwapIn(e.target.value as SideId)}
+                  >
+                    {swapSides.map((side) => (
+                      <option key={side}>{side}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flip-row">
+                <button type="button" className="flip" aria-label="对调支付和获得" onClick={flipSides}>
+                  ↓
+                </button>
+              </div>
+              <div className="token-box">
+                <div className="token-meta">
+                  <span>获得</span>
+                  <button
+                    type="button"
+                    className="text-btn"
+                    disabled={busy}
+                    onClick={() =>
+                      run('报价', async () => {
+                        await quoteSwap();
+                      })
+                    }
+                  >
+                    报价
+                  </button>
+                </div>
+                <div className="token-row">
+                  <div className={quoteOut === null ? 'out-amt empty' : 'out-amt'}>{quoteOut === null ? '—' : fmt(quoteOut)}</div>
+                  <select
+                    className="token-pill"
+                    aria-label="获得代币"
+                    value={swapOut}
+                    onChange={(e) => setSwapOut(e.target.value as SideId)}
+                  >
+                    {swapSides.map((side) => (
+                      <option key={side}>{side}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+            {impact ? <p className={impactClass}>{impact.text}</p> : null}
+            {quoteText ? <p className="quote-line">{quoteText}</p> : null}
             <button
+              type="button"
+              className="cta"
               disabled={busy || !address}
               onClick={() =>
-                run('添加流动性', async () => {
-                  if (!current) throw new Error('先选一个池子');
+                run('兑换', async () => {
                   const signer = needSigner();
                   const me = await signer.getAddress();
-                  const router = bind(deployment.exchanges[current.exchangeIndex].router, abis.router, signer);
-                  const amount0 = parseAmount(add0);
-                  const amount1 = parseAmount(add1);
-                  const routerAddr = await router.getAddress();
-                  if (same(current.token0, WETH)) {
-                    await ensureApprove(bind(current.token1, abis.erc20, signer), me, routerAddr, amount1);
-                    await (await router.addLiquidityETH(current.token1, amount1, me, { value: amount0 })).wait();
-                  } else if (same(current.token1, WETH)) {
-                    await ensureApprove(bind(current.token0, abis.erc20, signer), me, routerAddr, amount0);
-                    await (await router.addLiquidityETH(current.token0, amount0, me, { value: amount1 })).wait();
+                  const quoted = await quoteSwap();
+                  if (!quoted) throw new Error('报价失败，再试一次');
+                  const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
+                  const min = minOut(quoted.out);
+                  if (quoted.left.native) {
+                    await (
+                      await router.swapExactETHForTokens(quoted.right.address, min, me, { value: quoted.amount })
+                    ).wait();
+                  } else if (quoted.right.native) {
+                    await ensureApprove(
+                      bind(quoted.left.address, abis.erc20, signer),
+                      me,
+                      await router.getAddress(),
+                      quoted.amount,
+                    );
+                    await (await router.swapExactTokensForETH(quoted.left.address, quoted.amount, min, me)).wait();
                   } else {
-                    await ensureApprove(bind(current.token0, abis.erc20, signer), me, routerAddr, amount0);
-                    await ensureApprove(bind(current.token1, abis.erc20, signer), me, routerAddr, amount1);
-                    await (await router.addLiquidity(current.token0, current.token1, amount0, amount1, me)).wait();
+                    await ensureApprove(
+                      bind(quoted.left.address, abis.erc20, signer),
+                      me,
+                      await router.getAddress(),
+                      quoted.amount,
+                    );
+                    await (
+                      await router.swapExactTokensForTokens(
+                        quoted.left.address,
+                        quoted.right.address,
+                        quoted.amount,
+                        min,
+                        me,
+                      )
+                    ).wait();
                   }
                 })
               }
             >
-              向选中池子加流动性
+              兑换
             </button>
-          </div>
-        ) : null}
-        <p className="note">加池时如果两边比例和池子不一致，合约会按现价少收多的那一边。</p>
+          </section>
 
-        <div className="split">
-        <h2 className="sub">我的流动性 NFT</h2>
-        <PositionTable
-          rows={nfts}
-          action={(row) => (
-            <button
-              disabled={busy}
-              onClick={() =>
-                run(`取回 #${row.tokenId.toString()}`, async () => {
-                  const signer = needSigner();
-                  const me = await signer.getAddress();
-                  const router = bind(deployment.exchanges[row.exchangeIndex].router, abis.router, signer);
-                  if (same(row.token0, WETH) || same(row.token1, WETH)) {
-                    await (await router.removeLiquidityETH(row.tokenId, me)).wait();
-                  } else {
-                    await (await router.removeLiquidity(row.tokenId, me)).wait();
-                  }
-                })
-              }
-            >
-              销毁并取回
-            </button>
-          )}
-        />
-        <p className="note">当前可取回的数量已经包含手续费。部署者的初始 NFT 不要全部销毁，不然价差样本就没了。</p>
-        </div>
-      </section>
-
-      <section className="card" id="sim">
-        <h2 title="1 到 20 号账户。0 号是我自己，别让脚本把初始池子撤了">多账户模拟</h2>
-        <p className="note">
-          用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。
-        </p>
-        <div className="fields">
-          <label>
-            轮数
-            <input value={simRounds} onChange={(e) => setSimRounds(e.target.value)} />
-          </label>
-          <button
-            disabled={busy}
-            onClick={() =>
-              run('模拟', async () => {
-                const rounds = Number(simRounds);
-                if (!Number.isInteger(rounds) || rounds < 1 || rounds > 60) {
-                  throw new Error('轮数填 1 到 60');
+          <aside className="card" id="wallet">
+            <div className="card-title">
+              <h2>钱包</h2>
+              <span className="chip">{address ? `chain ${chainId ?? '-'}` : '本地'}</span>
+            </div>
+            <div className="connect">
+              <button type="button" className="primary" disabled={busy} onClick={() => run('本地账户', connectLocal)}>
+                使用本地测试账户
+              </button>
+              <button type="button" className="ghost" disabled={busy} onClick={() => run('连接钱包', connectMetaMask)}>
+                连接 MetaMask
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() =>
+                  run('刷新', async () => {
+                    const provider = providerRef.current ?? rpcProvider();
+                    providerRef.current = providerRef.current ?? provider;
+                    await reload(provider, address);
+                  })
                 }
-                const result = await runLocalSimulation(rounds, pushLog);
-                pushLog(`结果：兑换 ${result.swaps}，加池 ${result.adds}，撤池 ${result.removes}，跳过 ${result.skips}`);
-              })
-            }
-          >
-            开始模拟
-          </button>
+              >
+                刷新
+              </button>
+            </div>
+            <div className="balances">
+              {(
+                [
+                  ['ETH', balances.eth],
+                  ['WETH', balances.weth],
+                  ['TKA', balances.tka],
+                  ['TKB', balances.tkb],
+                ] as const
+              ).map(([sym, value]) => (
+                <div className="bal-row" key={sym}>
+                  <span className="sym">{sym}</span>
+                  <strong>{fmt(value)}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="faucet">
+              <button
+                type="button"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('领取 ETH', async () => {
+                    const signer = needSigner();
+                    const faucet = bind(deployment.ethFaucet, abis.faucet, signer);
+                    await (await faucet.claim()).wait();
+                  })
+                }
+              >
+                领 5 ETH
+              </button>
+              <button
+                type="button"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('领取 TKA', async () => {
+                    const signer = needSigner();
+                    await (await bind(TKA, abis.erc20, signer).claim()).wait();
+                  })
+                }
+              >
+                领 TKA
+              </button>
+              <button
+                type="button"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('领取 TKB', async () => {
+                    const signer = needSigner();
+                    await (await bind(TKB, abis.erc20, signer).claim()).wait();
+                  })
+                }
+              >
+                领 TKB
+              </button>
+            </div>
+            <div className="wrap-row">
+              <label>
+                包装 / 拆包
+                <input aria-label="包装数量" value={wrapAmt} onChange={(e) => setWrapAmt(e.target.value)} />
+              </label>
+              <button
+                type="button"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('包装 ETH', async () => {
+                    const signer = needSigner();
+                    const weth = bind(WETH, abis.weth, signer);
+                    await (await weth.deposit({ value: parseAmount(wrapAmt) })).wait();
+                  })
+                }
+              >
+                包装成 WETH
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('拆包 WETH', async () => {
+                    const signer = needSigner();
+                    const weth = bind(WETH, abis.weth, signer);
+                    await (await weth.withdraw(parseAmount(wrapAmt))).wait();
+                  })
+                }
+              >
+                拆回 ETH
+              </button>
+            </div>
+            <p className="note">
+              每个地址 TKA、TKB 最多领 3 次，每次 10000。ETH 水龙头每个地址 1 次。本地按钮用的是 Hardhat 公开测试账户，不要拿到别的网络。
+            </p>
+          </aside>
         </div>
-      </section>
 
-      <section className="card" id="arb">
-        <h2 title="一笔交易走完。中间失败就当没发生">
-          原子套利<span className="nick">搬砖</span>
-        </h2>
-        <p className="note">
-          合约会比较两个交易所，在更便宜的一边买入，再到另一边卖出。赚不到钱就整笔回滚。这里用的是 ERC20，ETH 池请选 WETH，并先包装。
-        </p>
-        <div className="fields">
-          <label>
-            支付
-            <select value={arbIn} onChange={(e) => setArbIn(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>WETH</option>
-            </select>
-          </label>
-          <label>
-            中间代币
-            <select value={arbOut} onChange={(e) => setArbOut(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>WETH</option>
-            </select>
-          </label>
-          <label>
-            数量
-            <input value={arbAmt} onChange={(e) => setArbAmt(e.target.value)} />
-          </label>
-        </div>
-        <div className="swap-actions">
-          <button
-            className="ghost"
-            disabled={busy}
-            onClick={() =>
-              run('套利预览', async () => {
-                const provider = providerRef.current ?? rpcProvider();
-                const view = await readArb(provider, arbIn, arbOut, parseAmount(arbAmt));
-                setArbView({ ...view, source: '预览' });
-              })
-            }
-          >
-            预览
-          </button>
-          <button
-            disabled={busy || !address}
-            onClick={() =>
-              run('执行套利', async () => {
-                const signer = needSigner();
-                const me = await signer.getAddress();
-                const amount = parseAmount(arbAmt);
-                const tokenIn = resolveSide(arbIn);
-                const tokenOut = resolveSide(arbOut);
-                if (tokenIn.native || tokenOut.native) throw new Error('套利请选择 WETH，不要选原生 ETH');
-                const arb = bind(deployment.arbitrage, abis.arbitrage, signer);
-                const view = await readArb(signer, arbIn, arbOut, amount);
-                setArbView({ ...view, source: '预览' });
-                await ensureApprove(bind(tokenIn.address, abis.erc20, signer), me, await arb.getAddress(), amount);
-                // 没有利润也发出去，让合约自己 revert，方便看到整笔回滚。
-                const tx = await arb.execute(
-                  deployment.exchanges[0].router,
-                  deployment.exchanges[1].router,
-                  tokenIn.address,
-                  tokenOut.address,
-                  amount,
-                  view.profitable ? view.profit : 0n,
-                );
-                const receipt = await tx.wait();
-                if (!receipt) throw new Error('没有交易回执');
-                const parsed = receipt.logs
-                  .map((log: { topics: string[]; data: string }) => {
-                    try {
-                      return arb.interface.parseLog(log);
-                    } catch {
-                      return null;
+        <section className="section" id="pools">
+          <div className="section-head">
+            <h2>交易池</h2>
+            <div className="seg" role="tablist" aria-label="筛选交易所">
+              <button type="button" role="tab" aria-selected={poolFilter < 0} onClick={() => setPoolFilter(-1)}>
+                全部
+              </button>
+              {deployment.exchanges.map((ex, index) => (
+                <button
+                  type="button"
+                  key={ex.name}
+                  role="tab"
+                  aria-selected={poolFilter === index}
+                  onClick={() => setPoolFilter(index)}
+                >
+                  {ex.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="pools-layout">
+            <div className="card" id="pool-table">
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>交易所</th>
+                      <th>交易对</th>
+                      <th className="num">储备</th>
+                      <th className="num">价格</th>
+                      <th className="num">份额</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shownPools.length === 0 ? (
+                      <tr>
+                        <td colSpan={5}>还没有池子。</td>
+                      </tr>
+                    ) : (
+                      shownPools.map((pool) => (
+                        <tr
+                          key={pool.key}
+                          className={pool.key === selected ? 'picked clickable' : 'clickable'}
+                          onClick={() => onChoose(pool.key)}
+                        >
+                          <td>
+                            <span className={pool.exchangeIndex === 0 ? 'chip chip-a' : 'chip chip-b'}>{pool.exchangeName}</span>
+                          </td>
+                          <td className="pair">
+                            {displaySymbol(pool.token0)}
+                            <span className="slash">/</span>
+                            {displaySymbol(pool.token1)}
+                          </td>
+                          <td className="num">
+                            {fmt(pool.reserve0)} / {fmt(pool.reserve1)}
+                          </td>
+                          <td className="num">
+                            1 {displaySymbol(pool.token0)} = {pool.reserve0 === 0n ? '-' : fmt((pool.reserve1 * 10n ** 18n) / pool.reserve0)}{' '}
+                            {displaySymbol(pool.token1)}
+                          </td>
+                          <td className="num">{fmt(pool.totalShares)}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="note">点一行看这个池子的流动性来源。ETH 池底层是 WETH。左边这条线是当前选中的池子。</p>
+            </div>
+
+            <div className="card" id="create">
+              <h2 className="subhead">创建交易池</h2>
+              <div className="form-grid">
+                <label className="wide">
+                  交易所
+                  <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
+                    {deployment.exchanges.map((ex, index) => (
+                      <option value={index} key={ex.name}>
+                        {ex.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  代币 A
+                  <select value={createLeft} onChange={(e) => setCreateLeft(e.target.value as SideId)}>
+                    <option>TKA</option>
+                    <option>TKB</option>
+                    <option>ETH</option>
+                  </select>
+                </label>
+                <label>
+                  数量 A
+                  <input value={createAmtLeft} onChange={(e) => setCreateAmtLeft(e.target.value)} />
+                </label>
+                <label>
+                  代币 B
+                  <select value={createRight} onChange={(e) => setCreateRight(e.target.value as SideId)}>
+                    <option>TKA</option>
+                    <option>TKB</option>
+                    <option>ETH</option>
+                  </select>
+                </label>
+                <label>
+                  数量 B
+                  <input value={createAmtRight} onChange={(e) => setCreateAmtRight(e.target.value)} />
+                </label>
+              </div>
+              <button
+                type="button"
+                className="cta"
+                disabled={busy || !address}
+                onClick={() =>
+                  run('创建池子', async () => {
+                    const signer = needSigner();
+                    const me = await signer.getAddress();
+                    const left = resolveSide(createLeft);
+                    const right = resolveSide(createRight);
+                    if (same(left.address, right.address)) throw new Error('不能用同一个代币建池');
+                    const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
+                    const amountLeft = parseAmount(createAmtLeft);
+                    const amountRight = parseAmount(createAmtRight);
+                    if (left.native || right.native) {
+                      const token = left.native ? right : left;
+                      const amountToken = left.native ? amountRight : amountLeft;
+                      const value = left.native ? amountLeft : amountRight;
+                      const erc20 = bind(token.address, abis.erc20, signer);
+                      await ensureApprove(erc20, me, await router.getAddress(), amountToken);
+                      await (await router.createPairAndAddLiquidityETH(token.address, amountToken, me, { value })).wait();
+                    } else {
+                      await ensureApprove(bind(left.address, abis.erc20, signer), me, await router.getAddress(), amountLeft);
+                      await ensureApprove(bind(right.address, abis.erc20, signer), me, await router.getAddress(), amountRight);
+                      await (
+                        await router.createPairAndAddLiquidity(left.address, right.address, amountLeft, amountRight, me)
+                      ).wait();
                     }
                   })
-                  .find((item: { name: string } | null) => item && item.name === 'ArbitrageExecuted');
-                if (!parsed) throw new Error('交易成功但没有找到套利事件');
-                setArbView({
-                  profitable: true,
-                  buyName: exchangeNameOfRouter(parsed.args.buyRouter),
-                  sellName: exchangeNameOfRouter(parsed.args.sellRouter),
-                  amountBought: parsed.args.amountBought,
-                  amountBack: parsed.args.amountBack,
-                  profit: parsed.args.profit,
-                  priceBuyBefore: parsed.args.priceBuyBefore,
-                  priceSellBefore: parsed.args.priceSellBefore,
-                  priceBuyAfter: parsed.args.priceBuyAfter,
-                  priceSellAfter: parsed.args.priceSellAfter,
-                  tokenIn: tokenIn.symbol,
-                  tokenOut: tokenOut.symbol,
-                  source: '链上结果',
-                });
-              })
-            }
-          >
-            执行套利
-          </button>
-        </div>
-        {arbView ? <ArbBox view={arbView} /> : null}
-      </section>
+                }
+              >
+                创建并添加流动性
+              </button>
+              <p className="note">池子已经存在时，这个按钮只会按当前比例继续加流动性。TKB/ETH 部署后还是空的，可以自己建。</p>
+            </div>
+          </div>
+        </section>
 
-      <section className="card">
-        <h2>操作记录</h2>
-        <div className="log">
-          {logs.length === 0 ? <div>还没有操作。</div> : logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
-        </div>
-      </section>
-      <footer className="foot">
-        浙大区块链作业2 · MiniDEX
-        <span className="sid">魏宝龙 · 3230105407</span>
-      </footer>
+        <section className="section" id="lp">
+          <div className="section-head">
+            <h2>流动性</h2>
+            {current ? (
+              <span className="chip">
+                {current.exchangeName} · {displaySymbol(current.token0)} / {displaySymbol(current.token1)}
+              </span>
+            ) : (
+              <span className="chip">先选一个池子</span>
+            )}
+          </div>
+          {lpPending ? <p className="chip chip-wait pending">{lpPending}</p> : null}
+          <div className="two">
+            <div className="card">
+              <h2 className="subhead">这个池子的来源</h2>
+              <div className={lpPending ? 'dim' : undefined}>
+                <PositionTable rows={lps} showOwner />
+              </div>
+              {current ? (
+                <div className="form-grid add-grid">
+                  <label>
+                    {displaySymbol(current.token0)}
+                    <input value={add0} onChange={(e) => setAdd0(e.target.value)} />
+                  </label>
+                  <label>
+                    {displaySymbol(current.token1)}
+                    <input value={add1} onChange={(e) => setAdd1(e.target.value)} />
+                  </label>
+                  <button
+                    type="button"
+                    className="cta"
+                    disabled={busy || !address}
+                    onClick={() =>
+                      run('添加流动性', async () => {
+                        if (!current) throw new Error('先选一个池子');
+                        const signer = needSigner();
+                        const me = await signer.getAddress();
+                        const router = bind(deployment.exchanges[current.exchangeIndex].router, abis.router, signer);
+                        const amount0 = parseAmount(add0);
+                        const amount1 = parseAmount(add1);
+                        const routerAddr = await router.getAddress();
+                        if (same(current.token0, WETH)) {
+                          await ensureApprove(bind(current.token1, abis.erc20, signer), me, routerAddr, amount1);
+                          await (await router.addLiquidityETH(current.token1, amount1, me, { value: amount0 })).wait();
+                        } else if (same(current.token1, WETH)) {
+                          await ensureApprove(bind(current.token0, abis.erc20, signer), me, routerAddr, amount0);
+                          await (await router.addLiquidityETH(current.token0, amount0, me, { value: amount1 })).wait();
+                        } else {
+                          await ensureApprove(bind(current.token0, abis.erc20, signer), me, routerAddr, amount0);
+                          await ensureApprove(bind(current.token1, abis.erc20, signer), me, routerAddr, amount1);
+                          await (await router.addLiquidity(current.token0, current.token1, amount0, amount1, me)).wait();
+                        }
+                      })
+                    }
+                  >
+                    向选中池子加流动性
+                  </button>
+                </div>
+              ) : null}
+              <p className="note">加池时如果两边比例和池子不一致，合约会按现价少收多的那一边。</p>
+            </div>
+            <div className="card" id="my-nfts">
+              <h2 className="subhead">我的流动性 NFT</h2>
+              <PositionTable
+                rows={nfts}
+                action={(row) => (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      run(`取回 #${row.tokenId.toString()}`, async () => {
+                        const signer = needSigner();
+                        const me = await signer.getAddress();
+                        const router = bind(deployment.exchanges[row.exchangeIndex].router, abis.router, signer);
+                        if (same(row.token0, WETH) || same(row.token1, WETH)) {
+                          await (await router.removeLiquidityETH(row.tokenId, me)).wait();
+                        } else {
+                          await (await router.removeLiquidity(row.tokenId, me)).wait();
+                        }
+                      })
+                    }
+                  >
+                    销毁并取回
+                  </button>
+                )}
+              />
+              <p className="note">当前可取回的数量已经包含手续费。部署者的初始 NFT 不要全部销毁，不然价差样本就没了。</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="section">
+          <div className="two even">
+            <div className="card" id="sim">
+              <h2 title="1 到 20 号账户。0 号是我自己，别让脚本把初始池子撤了">多账户模拟</h2>
+              <p className="note">
+                用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。
+              </p>
+              <div className="sim-actions">
+                <label className="stack">
+                  轮数
+                  <input value={simRounds} onChange={(e) => setSimRounds(e.target.value)} />
+                </label>
+                <button
+                  type="button"
+                  className="cta"
+                  disabled={busy}
+                  onClick={() =>
+                    run('模拟', async () => {
+                      const rounds = Number(simRounds);
+                      if (!Number.isInteger(rounds) || rounds < 1 || rounds > 60) {
+                        throw new Error('轮数填 1 到 60');
+                      }
+                      const result = await runLocalSimulation(rounds, pushLog);
+                      pushLog(`结果：兑换 ${result.swaps}，加池 ${result.adds}，撤池 ${result.removes}，跳过 ${result.skips}`);
+                    })
+                  }
+                >
+                  开始模拟
+                </button>
+              </div>
+            </div>
+
+            <div className="card" id="arb">
+              <h2 title="一笔交易走完。中间失败就当没发生">
+                原子套利<span className="nick">搬砖</span>
+              </h2>
+              <p className="note">
+                合约会比较两个交易所，在更便宜的一边买入，再到另一边卖出。赚不到钱就整笔回滚。这里用的是 ERC20，ETH 池请选 WETH，并先包装。
+              </p>
+              <div className="form-grid">
+                <label>
+                  支付
+                  <select value={arbIn} onChange={(e) => setArbIn(e.target.value as SideId)}>
+                    {arbSides.map((side) => (
+                      <option key={side}>{side}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  中间代币
+                  <select value={arbOut} onChange={(e) => setArbOut(e.target.value as SideId)}>
+                    {arbSides.map((side) => (
+                      <option key={side}>{side}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="wide">
+                  数量
+                  <input value={arbAmt} onChange={(e) => setArbAmt(e.target.value)} />
+                </label>
+              </div>
+              <div className="arb-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    run('套利预览', async () => {
+                      const provider = providerRef.current ?? rpcProvider();
+                      const view = await readArb(provider, arbIn, arbOut, parseAmount(arbAmt));
+                      setArbView({ ...view, source: '预览' });
+                    })
+                  }
+                >
+                  预览
+                </button>
+                <button
+                  type="button"
+                  className="cta"
+                  disabled={busy || !address}
+                  onClick={() =>
+                    run('执行套利', async () => {
+                      const signer = needSigner();
+                      const me = await signer.getAddress();
+                      const amount = parseAmount(arbAmt);
+                      const tokenIn = resolveSide(arbIn);
+                      const tokenOut = resolveSide(arbOut);
+                      if (tokenIn.native || tokenOut.native) throw new Error('套利请选择 WETH，不要选原生 ETH');
+                      const arb = bind(deployment.arbitrage, abis.arbitrage, signer);
+                      const view = await readArb(signer, arbIn, arbOut, amount);
+                      setArbView({ ...view, source: '预览' });
+                      await ensureApprove(bind(tokenIn.address, abis.erc20, signer), me, await arb.getAddress(), amount);
+                      // 没有利润也发出去，让合约自己 revert，方便看到整笔回滚。
+                      const tx = await arb.execute(
+                        deployment.exchanges[0].router,
+                        deployment.exchanges[1].router,
+                        tokenIn.address,
+                        tokenOut.address,
+                        amount,
+                        view.profitable ? view.profit : 0n,
+                      );
+                      const receipt = await tx.wait();
+                      if (!receipt) throw new Error('没有交易回执');
+                      const parsed = receipt.logs
+                        .map((log: { topics: string[]; data: string }) => {
+                          try {
+                            return arb.interface.parseLog(log);
+                          } catch {
+                            return null;
+                          }
+                        })
+                        .find((item: { name: string } | null) => item && item.name === 'ArbitrageExecuted');
+                      if (!parsed) throw new Error('交易成功但没有找到套利事件');
+                      setArbView({
+                        profitable: true,
+                        buyName: exchangeNameOfRouter(parsed.args.buyRouter),
+                        sellName: exchangeNameOfRouter(parsed.args.sellRouter),
+                        amountBought: parsed.args.amountBought,
+                        amountBack: parsed.args.amountBack,
+                        profit: parsed.args.profit,
+                        priceBuyBefore: parsed.args.priceBuyBefore,
+                        priceSellBefore: parsed.args.priceSellBefore,
+                        priceBuyAfter: parsed.args.priceBuyAfter,
+                        priceSellAfter: parsed.args.priceSellAfter,
+                        tokenIn: tokenIn.symbol,
+                        tokenOut: tokenOut.symbol,
+                        source: '已成交',
+                      });
+                    })
+                  }
+                >
+                  执行套利
+                </button>
+              </div>
+              {arbView ? <ArbBox view={arbView} /> : null}
+            </div>
+          </div>
+        </section>
+
+        <section className="card" id="log">
+          <div className="card-title">
+            <h2>操作记录</h2>
+          </div>
+          <div className="log">
+            {logs.length === 0 ? (
+              <p className="note">还没有操作。</p>
+            ) : (
+              logs.map((line, index) => <LogLine key={`${index}-${line}`} line={line} />)
+            )}
+          </div>
+        </section>
+
+        <footer className="foot">
+          <span>浙大区块链作业2 · MiniDEX</span>
+          <span className="sid">魏宝龙 · 3230105407</span>
+        </footer>
+      </main>
+      {error ? <div className="toast">{error}</div> : null}
+    </div>
+  );
+}
+
+function LogLine({ line }: { line: string }) {
+  const cut = line.indexOf('  ');
+  const time = cut > 0 ? line.slice(0, cut) : '';
+  const rest = cut > 0 ? line.slice(cut + 2) : line;
+  return (
+    <div className={rest.includes('失败') ? 'log-line bad' : 'log-line'}>
+      <span className="log-time">{time}</span>
+      <span>{rest}</span>
     </div>
   );
 }
 
 // 用页面上看到的储备估一下，不另发请求。差价里已经含 0.3% 手续费。
-function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId, swapOut: SideId, swapAmt: string) {
-  if (pools.length === 0) return '';
+function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId, swapOut: SideId, swapAmt: string): Impact | null {
+  if (pools.length === 0) return null;
   let amount: bigint;
   try {
     amount = parseAmount(swapAmt);
   } catch {
-    return '';
+    return null;
   }
-  if (amount === 0n) return '';
+  if (amount === 0n) return null;
   const left = resolveSide(swapIn);
   const right = resolveSide(swapOut);
-  if (same(left.address, right.address)) return '';
+  if (same(left.address, right.address)) return null;
   const pool = pools.find((row) => {
     if (row.exchangeIndex !== exchangeIndex) return false;
     const a = row.token0.toLowerCase();
@@ -838,19 +1010,19 @@ function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId,
     const o = right.address.toLowerCase();
     return (a === i && b === o) || (a === o && b === i);
   });
-  if (!pool) return '这个交易所还没有这对池子。';
+  if (!pool) return { text: '这个交易所还没有这对池子。', bps: 0n };
   const reserveIn = pool.token0.toLowerCase() === left.address.toLowerCase() ? pool.reserve0 : pool.reserve1;
   const reserveOut = pool.token0.toLowerCase() === left.address.toLowerCase() ? pool.reserve1 : pool.reserve0;
-  if (reserveIn === 0n || reserveOut === 0n) return '池子几乎空了，这单别硬换。';
+  if (reserveIn === 0n || reserveOut === 0n) return { text: '池子几乎空了，这单别硬换。', bps: 0n };
   const out = (reserveOut * amount * 997n) / (reserveIn * 1000n + amount * 997n);
-  if (out === 0n) return '按现在的储备，换出来会是 0。';
+  if (out === 0n) return { text: '按现在的储备，换出来会是 0。', bps: 0n };
   const ideal = amount * reserveOut;
   const got = out * reserveIn;
-  if (got >= ideal) return '';
+  if (got >= ideal) return null;
   const bps = ((ideal - got) * 10000n) / ideal;
   const whole = (bps / 100n).toString();
   const frac = (bps % 100n).toString().padStart(2, '0');
-  return `比池子现价大约少 ${whole}.${frac}%，0.3% 手续费算在里面。`;
+  return { text: `比池子现价大约少 ${whole}.${frac}%，0.3% 手续费算在里面。`, bps };
 }
 
 async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId, amount: bigint): Promise<ArbView> {
@@ -882,23 +1054,33 @@ async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId,
   };
 }
 
+export function arbHeadline(done: boolean, profitable: boolean, profitText: string, token: string) {
+  if (!profitable) return done ? '已成交，但没有正利润' : '预览，当前没有正利润';
+  return done ? `已成交，实际利润 ${profitText} ${token}` : `预览，预计利润 ${profitText} ${token}`;
+}
+
 function ArbBox({ view }: { view: ArbView }) {
+  const done = view.source === '已成交';
   return (
-    <div className="arb-box">
+    <div className={done ? 'arb-box done' : 'arb-box'}>
       <div className="arb-path" title="同一笔交易里按这个顺序走">
         <span className="step">{view.tokenIn}</span>
         <span className="hop">买入 · {view.buyName || '—'}</span>
-        <span className="step">{fmt(view.amountBought)} {view.tokenOut}</span>
+        <span className="step">
+          {fmt(view.amountBought)} {view.tokenOut}
+        </span>
         <span className="hop">卖出 · {view.sellName || '—'}</span>
-        <span className="step">{fmt(view.amountBack)} {view.tokenIn}</span>
+        <span className="step">
+          {fmt(view.amountBack)} {view.tokenIn}
+        </span>
       </div>
-      <p>
-        {view.source}
-        {view.profitable ? `，预计利润 ${fmt(view.profit)} ${view.tokenIn}` : '，当前没有正利润'}
+      <p className="arb-line">
+        <strong>{arbHeadline(done, view.profitable, fmt(view.profit), view.tokenIn)}</strong>
       </p>
-      <p>
-        在 {view.buyName} 用 {view.tokenIn} 买入 {fmt(view.amountBought)} {view.tokenOut}，再到 {view.sellName} 卖回{' '}
-        {fmt(view.amountBack)} {view.tokenIn}
+      <p className="note">
+        {done
+          ? `已在 ${view.buyName} 用 ${view.tokenIn} 买入 ${fmt(view.amountBought)} ${view.tokenOut}，并在 ${view.sellName} 卖出 ${fmt(view.amountBack)} ${view.tokenIn}`
+          : `在 ${view.buyName} 用 ${view.tokenIn} 买入 ${fmt(view.amountBought)} ${view.tokenOut}，再到 ${view.sellName} 卖回 ${fmt(view.amountBack)} ${view.tokenIn}`}
       </p>
       <p className="note">
         价格（1 {view.tokenIn} 值多少 {view.tokenOut}）：买入边 {fmt(view.priceBuyBefore)} → {fmt(view.priceBuyAfter)}，卖出边{' '}
@@ -927,8 +1109,8 @@ function PositionTable({
             <th>NFT</th>
             {showOwner ? <th>地址</th> : null}
             <th>交易对</th>
-            <th>当初放入</th>
-            <th>现在可取</th>
+            <th className="num">当初放入</th>
+            <th className="num">现在可取</th>
             <th>时间</th>
             {action ? <th></th> : null}
           </tr>
@@ -936,16 +1118,20 @@ function PositionTable({
         <tbody>
           {rows.map((row) => (
             <tr key={`${row.exchangeIndex}-${row.tokenId.toString()}`}>
-              <td>{row.exchangeName}</td>
-              <td>#{row.tokenId.toString()}</td>
-              {showOwner ? <td>{short(row.owner)}</td> : null}
               <td>
-                {displaySymbol(row.token0)} / {displaySymbol(row.token1)}
+                <span className={row.exchangeIndex === 0 ? 'chip chip-a' : 'chip chip-b'}>{row.exchangeName}</span>
               </td>
-              <td>
+              <td className="num">#{row.tokenId.toString()}</td>
+              {showOwner ? <td>{short(row.owner)}</td> : null}
+              <td className="pair">
+                {displaySymbol(row.token0)}
+                <span className="slash">/</span>
+                {displaySymbol(row.token1)}
+              </td>
+              <td className="num">
                 {fmt(row.amount0)} / {fmt(row.amount1)}
               </td>
-              <td>
+              <td className="num">
                 {fmt(row.out0)} / {fmt(row.out1)}
               </td>
               <td>{fmtTime(row.createdAt)}</td>
