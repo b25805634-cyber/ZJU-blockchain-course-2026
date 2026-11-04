@@ -237,9 +237,11 @@ function App() {
   return (
     <div className="page">
       <header className="top">
-        <p className="kicker">浙大区块链作业2</p>
-        <h1 title="玉泉机房周末版，别部署到主网">MiniDEX</h1>
-        <p>恒定乘积。流动性记在 NFT 上，手续费 0.3% 留在池子里。</p>
+        <div>
+          <p className="kicker">浙大区块链作业2</p>
+          <h1 title="玉泉机房周末版，别部署到主网">MiniDEX</h1>
+          <p className="lede">恒定乘积。流动性记在 NFT 上，手续费 0.3% 留在池子里。</p>
+        </div>
       </header>
       <nav className="nav">
         <a href="#wallet">钱包</a>
@@ -253,7 +255,7 @@ function App() {
 
       <section className="card" id="wallet">
         <h2>钱包和水龙头</h2>
-        <div className="bar" style={{ padding: 0, border: 'none', margin: 0 }}>
+        <div className="toolbar">
           <button disabled={busy} onClick={() => run('连接钱包', connectMetaMask)}>
             连接 MetaMask
           </button>
@@ -278,12 +280,24 @@ function App() {
           </span>
         </div>
         <div className="balances">
-          <span>ETH {fmt(balances.eth)}</span>
-          <span>WETH {fmt(balances.weth)}</span>
-          <span>TKA {fmt(balances.tka)}</span>
-          <span>TKB {fmt(balances.tkb)}</span>
+          <div>
+            <span className="sym">ETH</span>
+            <strong>{fmt(balances.eth)}</strong>
+          </div>
+          <div>
+            <span className="sym">WETH</span>
+            <strong>{fmt(balances.weth)}</strong>
+          </div>
+          <div>
+            <span className="sym">TKA</span>
+            <strong>{fmt(balances.tka)}</strong>
+          </div>
+          <div>
+            <span className="sym">TKB</span>
+            <strong>{fmt(balances.tkb)}</strong>
+          </div>
         </div>
-        <div className="row">
+        <div className="actions">
           <button
             disabled={busy || !address}
             onClick={() =>
@@ -355,7 +369,7 @@ function App() {
 
       <section className="card" id="pools">
         <h2>交易池</h2>
-        <div className="row">
+        <div className="fields compact">
           <label>
             筛选交易所
             <select value={poolFilter} onChange={(e) => setPoolFilter(Number(e.target.value))}>
@@ -411,8 +425,9 @@ function App() {
         </div>
         <p className="note">点一行可以看到这个池子的流动性来源。ETH 池底层是 WETH。</p>
 
-        <h2 style={{ marginTop: 16 }}>创建交易池</h2>
-        <div className="row">
+        <div className="split">
+        <h2 className="sub">创建交易池</h2>
+        <div className="fields">
           <label>
             交易所
             <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
@@ -482,11 +497,12 @@ function App() {
           </button>
         </div>
         <p className="note">池子已经存在时，这个按钮只会按当前比例继续加流动性。TKB/ETH 部署后还是空的，可以自己建。</p>
+        </div>
       </section>
 
       <section className="card" id="swap">
         <h2>兑换</h2>
-        <div className="row">
+        <div className="fields compact">
           <label>
             交易所
             <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
@@ -497,30 +513,38 @@ function App() {
               ))}
             </select>
           </label>
-          <label>
-            支付
-            <select value={swapIn} onChange={(e) => setSwapIn(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>ETH</option>
-            </select>
-          </label>
-          <label>
-            数量
-            <input value={swapAmt} onChange={(e) => setSwapAmt(e.target.value)} />
-          </label>
-          <label>
-            获得
-            <select value={swapOut} onChange={(e) => setSwapOut(e.target.value as SideId)}>
-              <option>TKA</option>
-              <option>TKB</option>
-              <option>ETH</option>
-            </select>
-          </label>
-          <label>
-            滑点 %
-            <input value={slippage} onChange={(e) => setSlippage(e.target.value)} />
-          </label>
+        </div>
+        <div className="swap-grid">
+          <div className="swap-side">
+            <label>
+              支付
+              <select value={swapIn} onChange={(e) => setSwapIn(e.target.value as SideId)}>
+                <option>TKA</option>
+                <option>TKB</option>
+                <option>ETH</option>
+              </select>
+            </label>
+            <label>
+              数量
+              <input value={swapAmt} onChange={(e) => setSwapAmt(e.target.value)} />
+            </label>
+          </div>
+          <div className="swap-side">
+            <label>
+              获得
+              <select value={swapOut} onChange={(e) => setSwapOut(e.target.value as SideId)}>
+                <option>TKA</option>
+                <option>TKB</option>
+                <option>ETH</option>
+              </select>
+            </label>
+            <label>
+              滑点 %
+              <input value={slippage} onChange={(e) => setSlippage(e.target.value)} />
+            </label>
+          </div>
+        </div>
+        <div className="swap-actions">
           <button
             className="ghost"
             disabled={busy}
@@ -566,7 +590,7 @@ function App() {
             兑换
           </button>
         </div>
-        {quoteText ? <p>{quoteText}</p> : null}
+        {quoteText ? <p className="quote">{quoteText}</p> : null}
         {impactText ? <p className="note">{impactText}</p> : null}
       </section>
 
@@ -581,7 +605,7 @@ function App() {
         )}
         <PositionTable rows={lps} showOwner />
         {current ? (
-          <div className="row">
+          <div className="fields">
             <label>
               {displaySymbol(current.token0)}
               <input value={add0} onChange={(e) => setAdd0(e.target.value)} />
@@ -621,7 +645,8 @@ function App() {
         ) : null}
         <p className="note">加池时如果两边比例和池子不一致，合约会按现价少收多的那一边。</p>
 
-        <h2 style={{ marginTop: 16 }}>我的流动性 NFT</h2>
+        <div className="split">
+        <h2 className="sub">我的流动性 NFT</h2>
         <PositionTable
           rows={nfts}
           action={(row) => (
@@ -645,6 +670,7 @@ function App() {
           )}
         />
         <p className="note">当前可取回的数量已经包含手续费。部署者的初始 NFT 不要全部销毁，不然价差样本就没了。</p>
+        </div>
       </section>
 
       <section className="card" id="sim">
@@ -652,7 +678,7 @@ function App() {
         <p className="note">
           用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。
         </p>
-        <div className="row">
+        <div className="fields">
           <label>
             轮数
             <input value={simRounds} onChange={(e) => setSimRounds(e.target.value)} />
@@ -682,7 +708,7 @@ function App() {
         <p className="note">
           合约会比较两个交易所，在更便宜的一边买入，再到另一边卖出。赚不到钱就整笔回滚。这里用的是 ERC20，ETH 池请选 WETH，并先包装。
         </p>
-        <div className="row">
+        <div className="fields">
           <label>
             支付
             <select value={arbIn} onChange={(e) => setArbIn(e.target.value as SideId)}>
@@ -703,6 +729,8 @@ function App() {
             数量
             <input value={arbAmt} onChange={(e) => setArbAmt(e.target.value)} />
           </label>
+        </div>
+        <div className="swap-actions">
           <button
             className="ghost"
             disabled={busy}
@@ -864,18 +892,18 @@ function ArbBox({ view }: { view: ArbView }) {
         <span className="hop">卖出 · {view.sellName || '—'}</span>
         <span className="step">{fmt(view.amountBack)} {view.tokenIn}</span>
       </div>
-      <div>
+      <p>
         {view.source}
         {view.profitable ? `，预计利润 ${fmt(view.profit)} ${view.tokenIn}` : '，当前没有正利润'}
-      </div>
-      <div>
+      </p>
+      <p>
         在 {view.buyName} 用 {view.tokenIn} 买入 {fmt(view.amountBought)} {view.tokenOut}，再到 {view.sellName} 卖回{' '}
         {fmt(view.amountBack)} {view.tokenIn}
-      </div>
-      <div>
+      </p>
+      <p className="note">
         价格（1 {view.tokenIn} 值多少 {view.tokenOut}）：买入边 {fmt(view.priceBuyBefore)} → {fmt(view.priceBuyAfter)}，卖出边{' '}
         {fmt(view.priceSellBefore)} → {fmt(view.priceSellAfter)}
-      </div>
+      </p>
     </div>
   );
 }

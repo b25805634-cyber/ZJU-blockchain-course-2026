@@ -1,8 +1,10 @@
 body {
   margin: 0;
-  background: #f6f1e7;
-  color: #243044;
+  background: #efeae1;
+  color: #1a2332;
   font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 button,
