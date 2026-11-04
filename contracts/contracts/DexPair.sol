@@ -17,7 +17,7 @@ contract DexPair {
     uint256 public reserve1;
     uint256 public totalShares;
 
-    // 0.3% = 30/10000。和 Uniswap V2 一样写成 997/1000，输出向下取整。
+    // 0.3% 写成 997/1000，输出向下取整。少掉的留在储备里，不进单独账户。
     uint256 public constant FEE_NUMERATOR = 997;
     uint256 public constant FEE_DENOMINATOR = 1000;
 

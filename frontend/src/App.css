@@ -4,14 +4,21 @@
   padding: 20px 16px 48px;
 }
 
+.kicker {
+  margin: 0 0 2px;
+  color: #a33b32;
+  font-size: 13px;
+}
+
 .top h1 {
   margin: 0 0 4px;
   font-size: 28px;
+  letter-spacing: 0.01em;
 }
 
 .top p {
   margin: 0;
-  color: #526070;
+  color: #5c6570;
 }
 
 .nav {
@@ -22,10 +29,10 @@
 }
 
 .nav a {
-  color: #0b57d0;
+  color: #24558a;
   text-decoration: none;
   background: #fff;
-  border: 1px solid #d5dce6;
+  border: 1px solid #e0d5c6;
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 14px;
@@ -34,8 +41,8 @@
 .bar,
 .card {
   background: #fff;
-  border: 1px solid #d5dce6;
-  border-radius: 10px;
+  border: 1px solid #e4d9cc;
+  border-radius: 8px;
   padding: 14px 16px;
   margin-bottom: 14px;
 }
@@ -78,8 +85,8 @@ input {
 }
 
 button {
-  border: 1px solid #0b57d0;
-  background: #0b57d0;
+  border: 1px solid #24558a;
+  background: #24558a;
   color: #fff;
   border-radius: 6px;
   padding: 7px 12px;
@@ -88,7 +95,7 @@ button {
 
 button.ghost {
   background: #fff;
-  color: #0b57d0;
+  color: #24558a;
 }
 
 button:disabled {
@@ -105,7 +112,7 @@ button:disabled {
 
 .balances span,
 .pill {
-  background: #eef3f8;
+  background: #f3ece3;
   border-radius: 6px;
   padding: 4px 8px;
 }
@@ -125,7 +132,7 @@ td {
 }
 
 tr.picked {
-  background: #e8f1ff;
+  background: #f8efe4;
 }
 
 tr.clickable {
@@ -138,7 +145,7 @@ tr.clickable {
 
 .note,
 .muted {
-  color: #526070;
+  color: #5c6570;
   font-size: 13px;
 }
 
@@ -163,10 +170,48 @@ tr.clickable {
 }
 
 .arb-box {
-  background: #f6f8fb;
+  background: #f8f4ee;
   border-radius: 8px;
   padding: 10px 12px;
   margin-top: 10px;
+}
+
+.arb-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.arb-path .step {
+  background: #fff;
+  border: 1px solid #e4d9cc;
+  padding: 2px 8px;
+}
+
+.arb-path .hop {
+  color: #a33b32;
+}
+
+.nick {
+  margin-left: 6px;
+  color: #a33b32;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.foot {
+  margin-top: 6px;
+  color: #7a736a;
+  font-size: 12px;
+}
+
+.foot .sid {
+  margin-left: 8px;
+  border-bottom: 1px dashed #a33b32;
+  cursor: help;
 }
 
 h2 {

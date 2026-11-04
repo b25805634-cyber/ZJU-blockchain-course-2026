@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./DexPair.sol";
 
-/// 一个工厂对应一个交易所。作业的 Bonus 会部署两份，池子互不影响。
+// Bonus 要两个所，工厂部署两份，池子不共用。
 contract DexFactory is Ownable {
     address public router;
     address[] public allPairs;
