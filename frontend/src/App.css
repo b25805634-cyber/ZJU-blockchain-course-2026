@@ -802,6 +802,16 @@ tbody tr.picked td:first-child {
   color: var(--bad);
 }
 
+.net-hint {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #78480f;
+  background: #1c1408;
+  color: #fde68a;
+  font-size: 13px;
+}
+
 .toast {
   position: fixed;
   right: 16px;

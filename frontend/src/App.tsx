@@ -4,24 +4,27 @@ import './App.css';
 import {
   abis,
   bind,
-  deployment,
+  deploymentForChain,
   displaySymbol,
   ensureApprove,
   errText,
   exchangeNameOfRouter,
   fmt,
   fmtTime,
+  HARDHAT_CHAIN_ID,
   loadBalances,
   loadLps,
   loadMyNfts,
   loadPools,
+  localhostDeployment,
+  networkLabel,
   parseAmount,
   resolveSide,
   same,
+  SEPOLIA_CHAIN_ID,
+  sepoliaDeployment,
   short,
-  TKA,
-  TKB,
-  WETH,
+  type DexDeployment,
   type PoolRow,
   type PositionRow,
   type SideId,
@@ -58,7 +61,7 @@ function App() {
   const pickGen = useRef(0);
 
   const [address, setAddress] = useState('');
-  const [chainId, setChainId] = useState<number | null>(null);
+  const [chainId, setChainId] = useState<number | null>(HARDHAT_CHAIN_ID);
   const [balances, setBalances] = useState(emptyBal);
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [selected, setSelected] = useState('');
@@ -96,16 +99,23 @@ function App() {
     setLogs((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 80));
   }
 
-  async function reload(provider: Provider, owner = address) {
-    const rows = await loadPools(provider);
+  async function reload(provider: Provider, owner = address, file: DexDeployment = localhostDeployment) {
+    if (!file.ready) {
+      setPools([]);
+      setLps([]);
+      setNfts([]);
+      setBalances(emptyBal);
+      return;
+    }
+    const rows = await loadPools(file, provider);
     const key =
       selectedRef.current && rows.some((row) => row.key === selectedRef.current)
         ? selectedRef.current
         : (rows[0]?.key ?? '');
     const pool = rows.find((row) => row.key === key);
-    const nextLps = pool ? await loadLps(provider, pool.exchangeIndex, pool.pair) : [];
-    const nextBal = owner ? await loadBalances(provider, owner) : null;
-    const nextNfts = owner ? await loadMyNfts(provider, owner) : null;
+    const nextLps = pool ? await loadLps(file, provider, pool.exchangeIndex, pool.pair) : [];
+    const nextBal = owner ? await loadBalances(file, provider, owner) : null;
+    const nextNfts = owner ? await loadMyNfts(file, provider, owner) : null;
     const liveKey =
       selectedRef.current && rows.some((row) => row.key === selectedRef.current) ? selectedRef.current : key;
     setPools(rows);
@@ -127,7 +137,9 @@ function App() {
     let cancelled = false;
     // 开发模式会装上又卸下一次，取消掉的请求别把错误留在页面上。
     reload(provider).catch(() => {
-      if (!cancelled) setError('本地节点还没连上。先在 contracts 里启动节点并部署，再点刷新。');
+      if (!cancelled) {
+        setError('本地节点还没连上。作业演示请先在 contracts 里启动节点并部署。要用 Sepolia，连接 MetaMask 并切到 Sepolia。');
+      }
     });
     return () => {
       cancelled = true;
@@ -149,49 +161,72 @@ function App() {
     // cacheTimeout 关掉，原因和 sim.ts 里的本地节点一样。
     const browser = new BrowserProvider(injected, undefined, { cacheTimeout: -1 });
     await browser.send('eth_requestAccounts', []);
-    const hexId = `0x${deployment.chainId.toString(16)}`;
     const network = await browser.getNetwork();
-    if (Number(network.chainId) !== deployment.chainId) {
-      try {
-        await injected.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexId }] });
-      } catch {
-        await injected.request({
-          method: 'wallet_addEthereumChain',
-          params: [
-            {
-              chainId: hexId,
-              chainName: 'Hardhat',
-              rpcUrls: [deployment.rpcUrl],
-              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-            },
-          ],
-        });
-      }
-    }
-    const next = new BrowserProvider(injected, undefined, { cacheTimeout: -1 });
-    const signer = await next.getSigner();
+    const id = Number(network.chainId);
+    const file = deploymentForChain(id);
+    const signer = await browser.getSigner();
     const addr = await signer.getAddress();
     signerRef.current = signer;
-    providerRef.current = next;
+    providerRef.current = browser;
     setAddress(addr);
-    setChainId(Number((await next.getNetwork()).chainId));
-    await reload(next, addr);
-    pushLog(`已连接 ${short(addr)}`);
+    setChainId(id);
+    if (!file) {
+      setPools([]);
+      setLps([]);
+      throw new Error(`钱包在 chain ${id}。作业演示切 Hardhat ${HARDHAT_CHAIN_ID}，测试网切 Sepolia ${SEPOLIA_CHAIN_ID}。`);
+    }
+    if (!file.ready) {
+      setPools([]);
+      setLps([]);
+      setNfts([]);
+      throw new Error('Sepolia 上还没有合约。先填 contracts/.env，再跑 npx hardhat run scripts/deploy.ts --network sepolia。');
+    }
+    await reload(browser, addr, file);
+    pushLog(`已连接 ${short(addr)} · ${networkLabel(id)}`);
+  }
+
+  async function switchChain(id: number) {
+    if (!window.ethereum) throw new Error('没有检测到浏览器钱包');
+    const injected = window.ethereum;
+    const hex = `0x${id.toString(16)}`;
+    try {
+      await injected.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hex }] });
+    } catch (err) {
+      const code = (err as { code?: number }).code;
+      if (code !== 4902) throw err;
+      const params =
+        id === SEPOLIA_CHAIN_ID
+          ? {
+              chainId: hex,
+              chainName: 'Sepolia',
+              rpcUrls: [sepoliaDeployment.rpcUrl],
+              nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
+              blockExplorerUrls: ['https://sepolia.etherscan.io'],
+            }
+          : {
+              chainId: hex,
+              chainName: 'Hardhat',
+              rpcUrls: [localhostDeployment.rpcUrl],
+              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+            };
+      await injected.request({ method: 'wallet_addEthereumChain', params: [params] });
+    }
+    await connectMetaMask();
   }
 
   async function connectLocal() {
     const provider = rpcProvider();
     const network = await provider.getNetwork();
-    if (Number(network.chainId) !== deployment.chainId) {
-      throw new Error(`本地链 id 是 ${network.chainId}，页面期望 ${deployment.chainId}`);
+    if (Number(network.chainId) !== HARDHAT_CHAIN_ID) {
+      throw new Error(`本地链 id 是 ${network.chainId}，页面期望 ${HARDHAT_CHAIN_ID}`);
     }
     const signer = walletAt(0, provider);
     const addr = await signer.getAddress();
     signerRef.current = signer;
     providerRef.current = provider;
     setAddress(addr);
-    setChainId(Number(network.chainId));
-    await reload(provider, addr);
+    setChainId(HARDHAT_CHAIN_ID);
+    await reload(provider, addr, localhostDeployment);
     pushLog(`使用本地账户 ${short(addr)}`);
   }
 
@@ -201,8 +236,19 @@ function App() {
     try {
       await fn();
       const provider = providerRef.current ?? rpcProvider();
+      providerRef.current = provider;
+      const id = Number((await provider.getNetwork()).chainId);
+      const file = deploymentForChain(id);
+      setChainId(id);
+      if (!file?.ready) {
+        throw new Error(
+          file
+            ? 'Sepolia 合约还没部署。先填 contracts/.env，再跑 deploy:sepolia。'
+            : `chain ${id} 用不上。请切到 Hardhat ${HARDHAT_CHAIN_ID} 或 Sepolia ${SEPOLIA_CHAIN_ID}。`,
+        );
+      }
       const owner = address || (signerRef.current ? await signerRef.current.getAddress() : '');
-      await reload(provider, owner);
+      await reload(provider, owner, file);
       pushLog(`${label} 成功`);
     } catch (err) {
       const text = errText(err);
@@ -213,16 +259,20 @@ function App() {
     }
   }
 
+  const dep = deploymentForChain(chainId);
+  const ready = Boolean(dep?.ready);
+
   async function onChoose(key: string) {
+    if (!dep) return;
     const pool = pools.find((row) => row.key === key);
     if (!pool) return;
     const gen = ++pickGen.current;
     const previous = selectedRef.current;
     selectedRef.current = key;
-    setLpPending(`正在读取 ${pool.exchangeName} · ${displaySymbol(pool.token0)} / ${displaySymbol(pool.token1)}`);
+    setLpPending(`正在读取 ${pool.exchangeName} · ${displaySymbol(dep, pool.token0)} / ${displaySymbol(dep, pool.token1)}`);
     const provider = providerRef.current ?? rpcProvider();
     try {
-      const rows = await loadLps(provider, pool.exchangeIndex, pool.pair);
+      const rows = await loadLps(dep, provider, pool.exchangeIndex, pool.pair);
       if (gen !== pickGen.current) return;
       setSelected(key);
       setLps(rows);
@@ -237,15 +287,21 @@ function App() {
 
   const shownPools = pools.filter((pool) => poolFilter < 0 || pool.exchangeIndex === poolFilter);
   const current = pools.find((pool) => pool.key === selected);
-  const impact = describeImpact(pools, exchangeIndex, swapIn, swapOut, swapAmt);
+  const impact = dep ? describeImpact(dep, pools, exchangeIndex, swapIn, swapOut, swapAmt) : null;
+  const wethAddr = dep?.tokens.WETH.address ?? '';
+
+  function sym(addr: string) {
+    return dep ? displaySymbol(dep, addr) : short(addr);
+  }
 
   async function quoteSwap() {
+    if (!dep || !dep.ready) throw new Error('先连到已经部署好的 Hardhat 或 Sepolia');
     const gen = ++quoteGen.current;
-    const left = resolveSide(swapIn);
-    const right = resolveSide(swapOut);
+    const left = resolveSide(dep, swapIn);
+    const right = resolveSide(dep, swapOut);
     if (same(left.address, right.address)) throw new Error('两个代币不能一样');
     const provider = providerRef.current ?? rpcProvider();
-    const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, provider);
+    const router = bind(dep.exchanges[exchangeIndex].router, abis.router, provider);
     const amount = parseAmount(swapAmt);
     const out = (await router.quote(left.address, right.address, amount)) as bigint;
     if (gen !== quoteGen.current) return null;
@@ -258,6 +314,7 @@ function App() {
     if (pools.length === 0) return;
     let cancelled = false;
     setQuoteOut(null);
+    setQuoteText('');
     const timer = window.setTimeout(() => {
       quoteSwap()
         .then((res) => {
@@ -319,17 +376,30 @@ function App() {
             <a href="#sim">模拟</a>
             <a href="#arb">套利</a>
           </nav>
-          <div className="bar-status">{address ? `${short(address)} · ${chainId ?? '-'}` : '未连接'}</div>
+          <div className="bar-status">
+            <span className="chip">{networkLabel(chainId)}</span>
+            {address ? ` ${short(address)}` : ' 未连接'}
+          </div>
         </div>
       </header>
 
       <main className="shell">
+        {!dep ? (
+          <p className="net-hint">
+            钱包在 {networkLabel(chainId)}。作业演示切到 Hardhat {HARDHAT_CHAIN_ID}，可选测试网切到 Sepolia {SEPOLIA_CHAIN_ID}。主网不要用。
+          </p>
+        ) : null}
+        {dep && !dep.ready ? (
+          <p className="net-hint">
+            已在 Sepolia，但仓库里的 sepolia.json 还是空的。填 contracts/.env 后运行 npx hardhat run scripts/deploy.ts --network sepolia，再刷新。
+          </p>
+        ) : null}
         <div className="stage">
           <section className="swap-card" id="swap">
             <div className="swap-head">
               <h2>兑换</h2>
               <div className="seg" role="tablist" aria-label="交易所">
-                {deployment.exchanges.map((ex, index) => (
+                {(dep?.exchanges ?? []).map((ex, index) => (
                   <button
                     type="button"
                     key={ex.name}
@@ -416,11 +486,12 @@ function App() {
               disabled={busy || !address}
               onClick={() =>
                 run('兑换', async () => {
+                  if (!dep) throw new Error('先选 Hardhat 或 Sepolia');
                   const signer = needSigner();
                   const me = await signer.getAddress();
                   const quoted = await quoteSwap();
                   if (!quoted) throw new Error('报价失败，再试一次');
-                  const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
+                  const router = bind(dep.exchanges[exchangeIndex].router, abis.router, signer);
                   const min = minOut(quoted.out);
                   if (quoted.left.native) {
                     await (
@@ -461,24 +532,36 @@ function App() {
           <aside className="card" id="wallet">
             <div className="card-title">
               <h2>钱包</h2>
-              <span className="chip">{address ? `chain ${chainId ?? '-'}` : '本地'}</span>
+              <span className="chip">{networkLabel(chainId)}</span>
             </div>
             <div className="connect">
-              <button type="button" className="primary" disabled={busy} onClick={() => run('本地账户', connectLocal)}>
-                使用本地测试账户
-              </button>
+              {chainId !== SEPOLIA_CHAIN_ID ? (
+                <button type="button" className="primary" disabled={busy} onClick={() => run('本地账户', connectLocal)}>
+                  使用本地测试账户
+                </button>
+              ) : (
+                <button type="button" className="ghost" disabled={busy} onClick={() => run('本地账户', connectLocal)}>
+                  回到本地 Hardhat
+                </button>
+              )}
               <button type="button" className="ghost" disabled={busy} onClick={() => run('连接钱包', connectMetaMask)}>
                 连接 MetaMask
               </button>
+              <div className="faucet">
+                <button type="button" className="ghost" disabled={busy} onClick={() => run('切换网络', () => switchChain(HARDHAT_CHAIN_ID))}>
+                  切到 Hardhat
+                </button>
+                <button type="button" className="ghost" disabled={busy} onClick={() => run('切换网络', () => switchChain(SEPOLIA_CHAIN_ID))}>
+                  切到 Sepolia
+                </button>
+              </div>
               <button
                 type="button"
                 className="ghost"
                 disabled={busy}
                 onClick={() =>
                   run('刷新', async () => {
-                    const provider = providerRef.current ?? rpcProvider();
-                    providerRef.current = providerRef.current ?? provider;
-                    await reload(provider, address);
+                    if (!providerRef.current) providerRef.current = rpcProvider();
                   })
                 }
               >
@@ -500,45 +583,50 @@ function App() {
                 </div>
               ))}
             </div>
-            <div className="faucet">
-              <button
-                type="button"
-                disabled={busy || !address}
-                onClick={() =>
-                  run('领取 ETH', async () => {
-                    const signer = needSigner();
-                    const faucet = bind(deployment.ethFaucet, abis.faucet, signer);
-                    await (await faucet.claim()).wait();
-                  })
-                }
-              >
-                领 5 ETH
-              </button>
-              <button
-                type="button"
-                disabled={busy || !address}
-                onClick={() =>
-                  run('领取 TKA', async () => {
-                    const signer = needSigner();
-                    await (await bind(TKA, abis.erc20, signer).claim()).wait();
-                  })
-                }
-              >
-                领 TKA
-              </button>
-              <button
-                type="button"
-                disabled={busy || !address}
-                onClick={() =>
-                  run('领取 TKB', async () => {
-                    const signer = needSigner();
-                    await (await bind(TKB, abis.erc20, signer).claim()).wait();
-                  })
-                }
-              >
-                领 TKB
-              </button>
-            </div>
+            {dep?.localFaucet ? (
+              <div className="faucet">
+                <button
+                  type="button"
+                  disabled={busy || !address}
+                  onClick={() =>
+                    run('领取 ETH', async () => {
+                      if (!dep) throw new Error('先连本地节点');
+                      const signer = needSigner();
+                      const faucet = bind(dep.ethFaucet, abis.faucet, signer);
+                      await (await faucet.claim()).wait();
+                    })
+                  }
+                >
+                  领 5 ETH
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !address}
+                  onClick={() =>
+                    run('领取 TKA', async () => {
+                      if (!dep) throw new Error('先连本地节点');
+                      const signer = needSigner();
+                      await (await bind(dep.tokens.TKA.address, abis.erc20, signer).claim()).wait();
+                    })
+                  }
+                >
+                  领 TKA
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || !address}
+                  onClick={() =>
+                    run('领取 TKB', async () => {
+                      if (!dep) throw new Error('先连本地节点');
+                      const signer = needSigner();
+                      await (await bind(dep.tokens.TKB.address, abis.erc20, signer).claim()).wait();
+                    })
+                  }
+                >
+                  领 TKB
+                </button>
+              </div>
+            ) : null}
             <div className="wrap-row">
               <label>
                 包装 / 拆包
@@ -550,7 +638,7 @@ function App() {
                 onClick={() =>
                   run('包装 ETH', async () => {
                     const signer = needSigner();
-                    const weth = bind(WETH, abis.weth, signer);
+                    const weth = bind(wethAddr, abis.weth, signer);
                     await (await weth.deposit({ value: parseAmount(wrapAmt) })).wait();
                   })
                 }
@@ -564,7 +652,7 @@ function App() {
                 onClick={() =>
                   run('拆包 WETH', async () => {
                     const signer = needSigner();
-                    const weth = bind(WETH, abis.weth, signer);
+                    const weth = bind(wethAddr, abis.weth, signer);
                     await (await weth.withdraw(parseAmount(wrapAmt))).wait();
                   })
                 }
@@ -572,9 +660,15 @@ function App() {
                 拆回 ETH
               </button>
             </div>
-            <p className="note">
-              每个地址 TKA、TKB 最多领 3 次，每次 10000。ETH 水龙头每个地址 1 次。本地按钮用的是 Hardhat 公开测试账户，不要拿到别的网络。
-            </p>
+            {dep?.localFaucet ? (
+              <p className="note">
+                每个地址 TKA、TKB 最多领 3 次，每次 10000。ETH 水龙头每个地址 1 次。本地按钮用的是 Hardhat 公开测试账户，不要拿到别的网络。
+              </p>
+            ) : (
+              <p className="note">
+                Sepolia 上没有领币按钮。测试 ETH 去 sepoliafaucet.com 或 Alchemy 的 Sepolia faucet 领，gas 由部署账户付。TKA、TKB 只用部署时铸下的那一点。
+              </p>
+            )}
           </aside>
         </div>
 
@@ -585,7 +679,7 @@ function App() {
               <button type="button" role="tab" aria-selected={poolFilter < 0} onClick={() => setPoolFilter(-1)}>
                 全部
               </button>
-              {deployment.exchanges.map((ex, index) => (
+              {(dep?.exchanges ?? []).map((ex, index) => (
                 <button
                   type="button"
                   key={ex.name}
@@ -627,16 +721,16 @@ function App() {
                             <span className={pool.exchangeIndex === 0 ? 'chip chip-a' : 'chip chip-b'}>{pool.exchangeName}</span>
                           </td>
                           <td className="pair">
-                            {displaySymbol(pool.token0)}
+                            {sym(pool.token0)}
                             <span className="slash">/</span>
-                            {displaySymbol(pool.token1)}
+                            {sym(pool.token1)}
                           </td>
                           <td className="num">
                             {fmt(pool.reserve0)} / {fmt(pool.reserve1)}
                           </td>
                           <td className="num">
-                            1 {displaySymbol(pool.token0)} = {pool.reserve0 === 0n ? '-' : fmt((pool.reserve1 * 10n ** 18n) / pool.reserve0)}{' '}
-                            {displaySymbol(pool.token1)}
+                            1 {sym(pool.token0)} = {pool.reserve0 === 0n ? '-' : fmt((pool.reserve1 * 10n ** 18n) / pool.reserve0)}{' '}
+                            {sym(pool.token1)}
                           </td>
                           <td className="num">{fmt(pool.totalShares)}</td>
                         </tr>
@@ -654,7 +748,7 @@ function App() {
                 <label className="wide">
                   交易所
                   <select value={exchangeIndex} onChange={(e) => setExchangeIndex(Number(e.target.value))}>
-                    {deployment.exchanges.map((ex, index) => (
+                    {(dep?.exchanges ?? []).map((ex, index) => (
                       <option value={index} key={ex.name}>
                         {ex.name}
                       </option>
@@ -694,10 +788,11 @@ function App() {
                   run('创建池子', async () => {
                     const signer = needSigner();
                     const me = await signer.getAddress();
-                    const left = resolveSide(createLeft);
-                    const right = resolveSide(createRight);
+                    if (!dep) throw new Error('先选 Hardhat 或 Sepolia');
+                    const left = resolveSide(dep, createLeft);
+                    const right = resolveSide(dep, createRight);
                     if (same(left.address, right.address)) throw new Error('不能用同一个代币建池');
-                    const router = bind(deployment.exchanges[exchangeIndex].router, abis.router, signer);
+                    const router = bind(dep.exchanges[exchangeIndex].router, abis.router, signer);
                     const amountLeft = parseAmount(createAmtLeft);
                     const amountRight = parseAmount(createAmtRight);
                     if (left.native || right.native) {
@@ -729,7 +824,7 @@ function App() {
             <h2>流动性</h2>
             {current ? (
               <span className="chip">
-                {current.exchangeName} · {displaySymbol(current.token0)} / {displaySymbol(current.token1)}
+                {current.exchangeName} · {sym(current.token0)} / {sym(current.token1)}
               </span>
             ) : (
               <span className="chip">先选一个池子</span>
@@ -740,16 +835,16 @@ function App() {
             <div className="card">
               <h2 className="subhead">这个池子的来源</h2>
               <div className={lpPending ? 'dim' : undefined}>
-                <PositionTable rows={lps} showOwner />
+                {dep ? <PositionTable dep={dep} rows={lps} showOwner /> : <p className="note">先连到 Hardhat 或 Sepolia。</p>}
               </div>
               {current ? (
                 <div className="form-grid add-grid">
                   <label>
-                    {displaySymbol(current.token0)}
+                    {sym(current.token0)}
                     <input value={add0} onChange={(e) => setAdd0(e.target.value)} />
                   </label>
                   <label>
-                    {displaySymbol(current.token1)}
+                    {sym(current.token1)}
                     <input value={add1} onChange={(e) => setAdd1(e.target.value)} />
                   </label>
                   <button
@@ -758,17 +853,18 @@ function App() {
                     disabled={busy || !address}
                     onClick={() =>
                       run('添加流动性', async () => {
+                        if (!dep) throw new Error('先选 Hardhat 或 Sepolia');
                         if (!current) throw new Error('先选一个池子');
                         const signer = needSigner();
                         const me = await signer.getAddress();
-                        const router = bind(deployment.exchanges[current.exchangeIndex].router, abis.router, signer);
+                        const router = bind(dep.exchanges[current.exchangeIndex].router, abis.router, signer);
                         const amount0 = parseAmount(add0);
                         const amount1 = parseAmount(add1);
                         const routerAddr = await router.getAddress();
-                        if (same(current.token0, WETH)) {
+                        if (same(current.token0, wethAddr)) {
                           await ensureApprove(bind(current.token1, abis.erc20, signer), me, routerAddr, amount1);
                           await (await router.addLiquidityETH(current.token1, amount1, me, { value: amount0 })).wait();
-                        } else if (same(current.token1, WETH)) {
+                        } else if (same(current.token1, wethAddr)) {
                           await ensureApprove(bind(current.token0, abis.erc20, signer), me, routerAddr, amount0);
                           await (await router.addLiquidityETH(current.token0, amount0, me, { value: amount1 })).wait();
                         } else {
@@ -787,7 +883,9 @@ function App() {
             </div>
             <div className="card" id="my-nfts">
               <h2 className="subhead">我的流动性 NFT</h2>
+              {dep ? (
               <PositionTable
+                dep={dep}
                 rows={nfts}
                 action={(row) => (
                   <button
@@ -797,8 +895,8 @@ function App() {
                       run(`取回 #${row.tokenId.toString()}`, async () => {
                         const signer = needSigner();
                         const me = await signer.getAddress();
-                        const router = bind(deployment.exchanges[row.exchangeIndex].router, abis.router, signer);
-                        if (same(row.token0, WETH) || same(row.token1, WETH)) {
+                        const router = bind(dep.exchanges[row.exchangeIndex].router, abis.router, signer);
+                        if (same(row.token0, wethAddr) || same(row.token1, wethAddr)) {
                           await (await router.removeLiquidityETH(row.tokenId, me)).wait();
                         } else {
                           await (await router.removeLiquidity(row.tokenId, me)).wait();
@@ -810,6 +908,9 @@ function App() {
                   </button>
                 )}
               />
+              ) : (
+                <p className="note">先连到 Hardhat 或 Sepolia。</p>
+              )}
               <p className="note">当前可取回的数量已经包含手续费。部署者的初始 NFT 不要全部销毁，不然价差样本就没了。</p>
             </div>
           </div>
@@ -820,7 +921,7 @@ function App() {
             <div className="card" id="sim">
               <h2 title="1 到 20 号账户。0 号是我自己，别让脚本把初始池子撤了">多账户模拟</h2>
               <p className="note">
-                用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。
+                用 Hardhat 的 20 个测试账户随机兑换、加池、撤池。不会动部署者放进去的初始流动性。节点必须开在 127.0.0.1:8545。Sepolia 上不跑这段。
               </p>
               <div className="sim-actions">
                 <label className="stack">
@@ -830,9 +931,10 @@ function App() {
                 <button
                   type="button"
                   className="cta"
-                  disabled={busy}
+                  disabled={busy || !dep?.localFaucet}
                   onClick={() =>
                     run('模拟', async () => {
+                      if (!dep?.localFaucet) throw new Error('模拟只在本地 Hardhat 上跑');
                       const rounds = Number(simRounds);
                       if (!Number.isInteger(rounds) || rounds < 1 || rounds > 60) {
                         throw new Error('轮数填 1 到 60');
@@ -884,7 +986,8 @@ function App() {
                   onClick={() =>
                     run('套利预览', async () => {
                       const provider = providerRef.current ?? rpcProvider();
-                      const view = await readArb(provider, arbIn, arbOut, parseAmount(arbAmt));
+                      if (!dep) throw new Error('先选 Hardhat 或 Sepolia');
+                      const view = await readArb(dep, provider, arbIn, arbOut, parseAmount(arbAmt));
                       setArbView({ ...view, source: '预览' });
                     })
                   }
@@ -900,17 +1003,18 @@ function App() {
                       const signer = needSigner();
                       const me = await signer.getAddress();
                       const amount = parseAmount(arbAmt);
-                      const tokenIn = resolveSide(arbIn);
-                      const tokenOut = resolveSide(arbOut);
+                      if (!dep) throw new Error('先选 Hardhat 或 Sepolia');
+                      const tokenIn = resolveSide(dep, arbIn);
+                      const tokenOut = resolveSide(dep, arbOut);
                       if (tokenIn.native || tokenOut.native) throw new Error('套利请选择 WETH，不要选原生 ETH');
-                      const arb = bind(deployment.arbitrage, abis.arbitrage, signer);
-                      const view = await readArb(signer, arbIn, arbOut, amount);
+                      const arb = bind(dep.arbitrage, abis.arbitrage, signer);
+                      const view = await readArb(dep, signer, arbIn, arbOut, amount);
                       setArbView({ ...view, source: '预览' });
                       await ensureApprove(bind(tokenIn.address, abis.erc20, signer), me, await arb.getAddress(), amount);
                       // 没有利润也发出去，让合约自己 revert，方便看到整笔回滚。
                       const tx = await arb.execute(
-                        deployment.exchanges[0].router,
-                        deployment.exchanges[1].router,
+                        dep.exchanges[0].router,
+                        dep.exchanges[1].router,
                         tokenIn.address,
                         tokenOut.address,
                         amount,
@@ -930,8 +1034,8 @@ function App() {
                       if (!parsed) throw new Error('交易成功但没有找到套利事件');
                       setArbView({
                         profitable: true,
-                        buyName: exchangeNameOfRouter(parsed.args.buyRouter),
-                        sellName: exchangeNameOfRouter(parsed.args.sellRouter),
+                        buyName: exchangeNameOfRouter(dep, parsed.args.buyRouter),
+                        sellName: exchangeNameOfRouter(dep, parsed.args.sellRouter),
                         amountBought: parsed.args.amountBought,
                         amountBack: parsed.args.amountBack,
                         profit: parsed.args.profit,
@@ -990,7 +1094,14 @@ function LogLine({ line }: { line: string }) {
 }
 
 // 用页面上看到的储备估一下，不另发请求。差价里已经含 0.3% 手续费。
-function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId, swapOut: SideId, swapAmt: string): Impact | null {
+function describeImpact(
+  dep: DexDeployment,
+  pools: PoolRow[],
+  exchangeIndex: number,
+  swapIn: SideId,
+  swapOut: SideId,
+  swapAmt: string,
+): Impact | null {
   if (pools.length === 0) return null;
   let amount: bigint;
   try {
@@ -999,8 +1110,8 @@ function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId,
     return null;
   }
   if (amount === 0n) return null;
-  const left = resolveSide(swapIn);
-  const right = resolveSide(swapOut);
+  const left = resolveSide(dep, swapIn);
+  const right = resolveSide(dep, swapOut);
   if (same(left.address, right.address)) return null;
   const pool = pools.find((row) => {
     if (row.exchangeIndex !== exchangeIndex) return false;
@@ -1025,22 +1136,28 @@ function describeImpact(pools: PoolRow[], exchangeIndex: number, swapIn: SideId,
   return { text: `比池子现价大约少 ${whole}.${frac}%，0.3% 手续费算在里面。`, bps };
 }
 
-async function readArb(runner: Signer | Provider, arbIn: SideId, arbOut: SideId, amount: bigint): Promise<ArbView> {
-  const tokenIn = resolveSide(arbIn);
-  const tokenOut = resolveSide(arbOut);
+async function readArb(
+  dep: DexDeployment,
+  runner: Signer | Provider,
+  arbIn: SideId,
+  arbOut: SideId,
+  amount: bigint,
+): Promise<ArbView> {
+  const tokenIn = resolveSide(dep, arbIn);
+  const tokenOut = resolveSide(dep, arbOut);
   if (same(tokenIn.address, tokenOut.address)) throw new Error('两个代币不能一样');
-  const arb = bind(deployment.arbitrage, abis.arbitrage, runner);
+  const arb = bind(dep.arbitrage, abis.arbitrage, runner);
   const plan = await arb.preview(
-    deployment.exchanges[0].router,
-    deployment.exchanges[1].router,
+    dep.exchanges[0].router,
+    dep.exchanges[1].router,
     tokenIn.address,
     tokenOut.address,
     amount,
   );
   return {
     profitable: Boolean(plan.profitable),
-    buyName: exchangeNameOfRouter(plan.buyRouter),
-    sellName: exchangeNameOfRouter(plan.sellRouter),
+    buyName: exchangeNameOfRouter(dep, plan.buyRouter),
+    sellName: exchangeNameOfRouter(dep, plan.sellRouter),
     amountBought: plan.amountBought as bigint,
     amountBack: plan.amountBack as bigint,
     profit: plan.profit as bigint,
@@ -1091,10 +1208,12 @@ function ArbBox({ view }: { view: ArbView }) {
 }
 
 function PositionTable({
+  dep,
   rows,
   showOwner,
   action,
 }: {
+  dep: DexDeployment;
   rows: PositionRow[];
   showOwner?: boolean;
   action?: (row: PositionRow) => ReactNode;
@@ -1124,9 +1243,9 @@ function PositionTable({
               <td className="num">#{row.tokenId.toString()}</td>
               {showOwner ? <td>{short(row.owner)}</td> : null}
               <td className="pair">
-                {displaySymbol(row.token0)}
+                {displaySymbol(dep, row.token0)}
                 <span className="slash">/</span>
-                {displaySymbol(row.token1)}
+                {displaySymbol(dep, row.token1)}
               </td>
               <td className="num">
                 {fmt(row.amount0)} / {fmt(row.amount1)}

@@ -1,5 +1,26 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
-import { defineConfig } from "hardhat/config";
+import { configVariable, defineConfig } from "hardhat/config";
+
+// 读 contracts/.env。已经在环境里的值不动。私钥不会写进代码。
+const envFile = path.resolve(".env");
+if (existsSync(envFile)) {
+  for (const line of readFileSync(envFile, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+    const eq = trimmed.indexOf("=");
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
 
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthers],
@@ -46,6 +67,14 @@ export default defineConfig({
       chainType: "l1",
       url: process.env.GANACHE_RPC_URL ?? "http://127.0.0.1:8545",
       accounts: "remote",
+    },
+    // 只有 --network sepolia 才会去读这两个变量。本地测试不需要填。
+    sepolia: {
+      type: "http",
+      chainType: "l1",
+      chainId: 11155111,
+      url: configVariable("SEPOLIA_RPC_URL"),
+      accounts: [configVariable("DEPLOYER_PRIVATE_KEY")],
     },
   },
 });
