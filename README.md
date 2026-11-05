@@ -41,7 +41,7 @@ npm start
 
 作业评分还是看本地 Hardhat 和截图。Sepolia 只是想把同一套合约放到测试网上玩玩，不接主网。
 
-1. 领一点 Sepolia ETH。公共水龙头有 [sepoliafaucet.com](https://sepoliafaucet.com/) 和 [Alchemy 的 Sepolia faucet](https://www.alchemy.com/faucets/ethereum-sepolia)。gas 和池子里的 ETH 都从部署账户扣，准备 0.1 个比较稳。
+1. 领一点 Sepolia ETH。公共水龙头有 [sepoliafaucet.com](https://sepoliafaucet.com/) 和 [Alchemy 的 Sepolia faucet](https://www.alchemy.com/faucets/ethereum-sepolia)；免费水龙头往往很慢。gas 和池子里的 ETH 都从部署账户扣，一次部署大约需要 0.05 ETH 以上，准备 0.1 个比较稳。
 2. 在 `contracts` 里把 `.env.example` 复制成 `.env`，填 `SEPOLIA_RPC_URL` 和 `DEPLOYER_PRIVATE_KEY`。私钥用测试账户，0x 开头。`.env` 已经被 gitignore，不要提交。
 3. 部署。地址写到 `frontend/src/deployments/sepolia.json`。这个文件不写私钥，`rpcUrl` 用的是公共节点 `https://rpc.sepolia.org`。真正发交易的 RPC 只留在 `.env` 里。
 
@@ -50,7 +50,7 @@ cd contracts
 npx hardhat run scripts/deploy.ts --network sepolia
 ```
 
-也可以 `npm run deploy:sepolia`。池子比本地小：TKA/TKB 是 1000/1000 和 1000/2000，ETH 池只有 0.01 和 0.015。套利数量填 100 左右，别填本地那笔 1000。
+也可以 `npm run deploy:sepolia`。池子比本地小：TKA/TKB 是 1000/1000 和 1000/2000，ETH 池只有 0.0008 和 0.0012 WETH。套利数量填 100 左右，别填本地那笔 1000。
 
 4. `cd frontend && npm start`。MetaMask 切到 Sepolia，点「连接 MetaMask」。页面认 chainId 11155111 就读 sepolia.json，认 31337 就读 localhost.json。
 5. Sepolia 上没有「领 5 ETH / 领 TKA / 领 TKB」，也没有 20 个账户模拟。那两个是本地作业水龙头。想回本地演示，点「回到本地 Hardhat」或「使用本地测试账户」。
