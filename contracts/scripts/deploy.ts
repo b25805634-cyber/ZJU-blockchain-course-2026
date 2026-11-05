@@ -23,8 +23,10 @@ async function main() {
   const tokenA = await deploy(ethers, "TestERC20", ["Token A", "TKA", deployerAddr]);
   const tokenB = await deploy(ethers, "TestERC20", ["Token B", "TKB", deployerAddr]);
   const weth = await deploy(ethers, "WETH");
-  // 本地水龙头里放 100 ETH。Sepolia 不往里面打钱，页面上也不显示领币按钮。
-  const faucet = await deploy(ethers, "EthFaucet", [], sepolia ? {} : { value: parseEther("100") });
+  // 本地水龙头里放 100 ETH。Sepolia 不部署 EthFaucet，manifest 里写零地址。
+  const faucet = sepolia
+    ? null
+    : await deploy(ethers, "EthFaucet", [], { value: parseEther("100") });
 
   const dexA = await deployExchange(ethers, deployerAddr, weth, "MiniDEX-A", "MDA-LP");
   const dexB = await deployExchange(ethers, deployerAddr, weth, "MiniDEX-B", "MDB-LP");
@@ -33,10 +35,10 @@ async function main() {
   // Sepolia 只铸够铺池和自己试一笔。本地仍然是大数，方便 20 个账户模拟。
   const mintA = sepolia ? parseEther("4000") : parseEther("1000000");
   const mintB = sepolia ? parseEther("4000") : parseEther("1000000");
-  const wrapEth = sepolia ? parseEther("0.025") : parseEther("13");
+  const wrapEth = sepolia ? parseEther("0.002") : parseEther("13");
   await (await tokenA.mint(deployerAddr, mintA)).wait();
   await (await tokenB.mint(deployerAddr, mintB)).wait();
-  // TKB/ETH 留给前端自己创建。Sepolia 的 ETH 池只有 0.01 和 0.015。
+  // TKB/ETH 留给前端自己创建。Sepolia 的 ETH 池只有 0.0008 和 0.0012 WETH。
   await (await weth.deposit({ value: wrapEth })).wait();
 
   const tokenAAddr = await tokenA.getAddress();
@@ -53,8 +55,8 @@ async function main() {
   if (sepolia) {
     await seed(dexA, tokenAAddr, tokenBAddr, parseEther("1000"), parseEther("1000"), deployerAddr, "TKA/TKB 1000/1000");
     await seed(dexB, tokenAAddr, tokenBAddr, parseEther("1000"), parseEther("2000"), deployerAddr, "TKA/TKB 1000/2000");
-    await seed(dexA, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.01"), deployerAddr, "TKA/WETH 100/0.01");
-    await seed(dexB, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.015"), deployerAddr, "TKA/WETH 100/0.015");
+    await seed(dexA, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.0008"), deployerAddr, "TKA/WETH 100/0.0008");
+    await seed(dexB, tokenAAddr, wethAddr, parseEther("100"), parseEther("0.0012"), deployerAddr, "TKA/WETH 100/0.0012");
   } else {
     await seed(dexA, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("10000"), deployerAddr, "TKA/TKB 10000/10000");
     await seed(dexB, tokenAAddr, tokenBAddr, parseEther("10000"), parseEther("20000"), deployerAddr, "TKA/TKB 10000/20000");
@@ -105,7 +107,7 @@ async function main() {
         symbol: await weth.symbol(),
       },
     },
-    ethFaucet: await faucet.getAddress(),
+    ethFaucet: faucet ? await faucet.getAddress() : "0x0000000000000000000000000000000000000000",
     exchanges: [
       {
         name: dexA.name,
